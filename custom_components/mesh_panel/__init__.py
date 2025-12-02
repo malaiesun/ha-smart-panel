@@ -1,59 +1,43 @@
-import json
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.components import mqtt
-
-from .const import DOMAIN
-from .panel_manager import MeshPanelManager
+from .const import DOMAIN, CONF_PANEL_ID, CONF_DEVICES, TOPIC_ANNOUNCE
+from .panel_manager import MeshPanelController
+import json
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["binary_sensor"]
 
-
-async def async_setup(hass: HomeAssistant, config: dict):
-    hass.data.setdefault(DOMAIN, {})
-
-    async def _on_announce(msg):
+async def async_setup(hass: HomeAssistant, config):
+    async def _announce(msg):
         try:
-            p = json.loads(msg.payload or "{}")
-            panel_id = p.get("panel_id")
-            if not panel_id:
-                return
-            # Skip if already configured
-            for e in hass.config_entries.async_entries(DOMAIN):
-                if e.unique_id == panel_id:
-                    return
-            await hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": "discovery"},
-                data={"panel_id": panel_id, "ip": p.get("ip")},
-            )
-        except Exception as e:
-            _LOGGER.warning("mesh_panel announce error: %s", e)
-
-    await mqtt.async_subscribe(hass, "smartpanel/announce", _on_announce)
+            data = json.loads(msg.payload or "{}")
+            panel_id = data.get("panel_id")
+            if panel_id:
+                await hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": "mqtt"}, data={CONF_PANEL_ID: panel_id}
+                )
+        except: pass
+    await mqtt.async_subscribe(hass, TOPIC_ANNOUNCE, _announce)
     return True
-
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    mgr = MeshPanelManager(hass, entry)
-    hass.data[DOMAIN][entry.entry_id] = mgr
-    await mgr.async_setup()
+    panel_id = entry.data[CONF_PANEL_ID]
+    # GET CONFIG FROM VISUAL EDITOR STORAGE
+    devices_data = entry.options.get(CONF_DEVICES, []) 
 
-    # Ensure a clickable device page by adding a status entity
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    ctrl = MeshPanelController(hass, panel_id, devices_data)
+    await ctrl.start()
 
-    entry.async_on_unload(entry.add_update_listener(_update_listener))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ctrl
+    
+    # Reload when options change (Visual Editor save)
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
-
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    mgr: MeshPanelManager = hass.data[DOMAIN].pop(entry.entry_id)
-    await mgr.async_unload()
+    hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
 
-
-async def _update_listener(hass: HomeAssistant, entry: ConfigEntry):
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
     await hass.config_entries.async_reload(entry.entry_id)
