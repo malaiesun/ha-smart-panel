@@ -1,0 +1,18 @@
+send_notification:
+  name: Send Notification
+  description: Sends a toast to the MESH Panel.
+  fields:
+    title:
+      name: Title
+      example: "Doorbell"
+    message:
+      name: Message
+      example: "Ding dong!"
+    duration:
+      name: Duration (ms)
+      default: 5000
+      selector:
+        number:
+          min: 1000
+          max: 60000
+          unit_of_measurement: ms

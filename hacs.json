@@ -1,8 +1,8 @@
 {
-  "name": "ESP32 Smart Panel Controller",
+  "name": "MESH Smart Home Panel",
   "content_in_root": false,
   "zip_release": false,
-  "filename": "smart_panel.zip",
+  "filename": "mesh_panel.zip",
   "render_readme": true,
   "homeassistant": "2023.1.0"
 }

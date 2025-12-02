@@ -17,16 +17,15 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     topic_base = entry.data.get(CONF_TOPIC, DEFAULT_TOPIC)
     
-    # Load manual config from options, or fallback to empty
     manual_config_str = entry.options.get(CONF_MANUAL_CONFIG, "")
     devices_data = []
     if manual_config_str:
         try:
             devices_data = yaml.safe_load(manual_config_str)
         except Exception as e:
-            _LOGGER.error(f"Failed to parse Smart Panel config: {e}")
+            _LOGGER.error(f"MESH Panel Config Error: {e}")
 
-    controller = SmartPanelController(hass, topic_base, devices_data)
+    controller = MeshPanelController(hass, topic_base, devices_data)
     await controller.start()
     
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = controller
@@ -39,20 +38,20 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     return True
 
-class SmartPanelController:
+class MeshPanelController:
     def __init__(self, hass, topic, devices_config):
         self.hass = hass
         self.topic_ui = f"{topic}/ui"
         self.topic_state = f"{topic}/state"
         self.topic_action = f"{topic}/action"
+        self.topic_notify = f"{topic}/notify"
         self.devices_config = devices_config
         self.watched_entities = set()
 
     async def start(self):
-        # 1. Listen for clicks
         await mqtt.async_subscribe(self.hass, self.topic_action, self.handle_action)
         await self.register_services()
-        # 2. Collect all entities to watch for state changes
+        
         if self.devices_config:
             for dev in self.devices_config:
                 if "state_entity" in dev:
@@ -61,18 +60,13 @@ class SmartPanelController:
                     if "entity" in c:
                         self.watched_entities.add(c["entity"])
 
-            # 3. Subscribe to HA State Machine
             if self.watched_entities:
                 async_track_state_change_event(
                     self.hass, list(self.watched_entities), self.handle_ha_state_change
                 )
-
-            # 4. Push initial UI
             await self.publish_ui()
 
     async def publish_ui(self):
-        # Convert YAML config style to ESP32 JSON style
-        # (They are nearly identical, just need to ensure keys match)
         payload = {"devices": self.devices_config}
         await mqtt.async_publish(self.hass, self.topic_ui, json.dumps(payload), retain=True)
 
@@ -84,11 +78,8 @@ class SmartPanelController:
             service_data = {ATTR_ENTITY_ID: entity_id}
             service = None
 
-            # SWITCH
             if "state" in data:
                 service = SERVICE_TURN_ON if data["state"] == "on" else SERVICE_TURN_OFF
-            
-            # SLIDER (Brightness/Volume/Number)
             elif "value" in data:
                 val = int(data["value"])
                 if domain == "light":
@@ -97,42 +88,33 @@ class SmartPanelController:
                 elif domain == "fan":
                     service = SERVICE_TURN_ON
                     service_data["percentage"] = val
-                elif domain == "number" or domain == "input_number":
-                    service = "set_value"
-                    service_data["value"] = val
                 elif domain == "media_player":
                     service = "volume_set"
                     service_data["volume_level"] = val / 100.0 if val > 1 else val
-                elif domain == "cover":
-                    service = "set_cover_position"
-                    service_data["position"] = val
                 elif domain == "climate":
                     service = "set_temperature"
                     service_data["temperature"] = val
+                else:
+                    service = "set_value"
+                    service_data["value"] = val
 
-            # COLOR
             elif "rgb_color" in data:
                 service = SERVICE_TURN_ON
                 service_data[ATTR_RGB_COLOR] = data["rgb_color"]
 
-            # DROPDOWN
             elif "option" in data:
-                opt = data["option"]
-                if domain == "select" or domain == "input_select":
-                    service = "select_option"
-                    service_data["option"] = opt
-                elif domain == "media_player":
+                service_data["option"] = data["option"]
+                service = "select_option"
+                if domain == "media_player":
                     service = "select_source"
-                    service_data["source"] = opt
-                elif domain == "climate":
-                    service = "set_hvac_mode"
-                    service_data["hvac_mode"] = opt
+                    service_data["source"] = data["option"]
+                    del service_data["option"]
 
             if service:
                 await self.hass.services.async_call(domain, service, service_data)
 
         except Exception as e:
-            _LOGGER.error(f"ESP32 Panel Action Error: {e}")
+            _LOGGER.error(f"MESH Action Error: {e}")
 
     @callback
     async def handle_ha_state_change(self, event):
@@ -140,51 +122,33 @@ class SmartPanelController:
         new_state = event.data["new_state"]
         if not new_state: return
 
-        # 1. Basic State
-        payload = {"entity": entity_id, "state": new_state.state}
-        await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
+        # Publish State
+        await mqtt.async_publish(self.hass, self.topic_state, json.dumps({
+            "entity": entity_id, "state": new_state.state
+        }))
 
-        # 2. Attributes (Sync Slider/Color)
-        attributes = new_state.attributes
-        
-        # Brightness
-        if "brightness" in attributes:
-            p = {"entity": entity_id, "value": attributes["brightness"]}
-            await mqtt.async_publish(self.hass, self.topic_state, json.dumps(p))
-        
-        # Volume
-        if "volume_level" in attributes:
-            vol = int(attributes["volume_level"] * 100)
-            p = {"entity": entity_id, "value": vol}
-            await mqtt.async_publish(self.hass, self.topic_state, json.dumps(p))
+        attrs = new_state.attributes
+        # Publish Attributes
+        if "brightness" in attrs:
+            await mqtt.async_publish(self.hass, self.topic_state, json.dumps({
+                "entity": entity_id, "value": attrs["brightness"]
+            }))
+        if "rgb_color" in attrs:
+            await mqtt.async_publish(self.hass, self.topic_state, json.dumps({
+                "entity": entity_id, "rgb_color": attrs["rgb_color"]
+            }))
+        if "volume_level" in attrs:
+            await mqtt.async_publish(self.hass, self.topic_state, json.dumps({
+                "entity": entity_id, "value": int(attrs["volume_level"] * 100)
+            }))
 
-        # Fan Speed
-        if "percentage" in attributes:
-            p = {"entity": entity_id, "value": attributes["percentage"]}
-            await mqtt.async_publish(self.hass, self.topic_state, json.dumps(p))
-
-        # Cover Position
-        if "current_position" in attributes:
-            p = {"entity": entity_id, "value": attributes["current_position"]}
-            await mqtt.async_publish(self.hass, self.topic_state, json.dumps(p))
-
-        # RGB
-        if "rgb_color" in attributes:
-            p = {"entity": entity_id, "rgb_color": attributes["rgb_color"]}
-            await mqtt.async_publish(self.hass, self.topic_state, json.dumps(p))
-            
     async def register_services(self):
-        """Register custom services."""
-        async def handle_send_notification(call):
-            title = call.data.get("title")
-            message = call.data.get("message")
-            duration = call.data.get("duration", 5000)
-            
+        async def handle_notify(call):
             payload = {
-                "title": title,
-                "message": message,
-                "duration": duration
+                "title": call.data.get("title", "MESH Alert"),
+                "message": call.data.get("message", ""),
+                "duration": call.data.get("duration", 5000)
             }
             await mqtt.async_publish(self.hass, self.topic_notify, json.dumps(payload))
 
-        self.hass.services.async_register(DOMAIN, "send_notification", handle_send_notification)
+        self.hass.services.async_register(DOMAIN, "send_notification", handle_notify)
