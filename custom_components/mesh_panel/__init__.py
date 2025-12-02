@@ -10,8 +10,11 @@ from .const import (
     TOPIC_ANNOUNCE
 )
 from .panel_manager import MeshPanelController
+from .config_flow import ConfigFlow  # Add this import
 
 _LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = []  # Add if you have platforms
 
 async def async_setup(hass: HomeAssistant, config):
     # Subscribe for auto-discovery announces
@@ -41,7 +44,6 @@ async def async_setup(hass: HomeAssistant, config):
     await mqtt.async_subscribe(hass, TOPIC_ANNOUNCE, _announce)
     return True
 
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     panel_id = entry.data[CONF_PANEL_ID]
     manual_yaml = entry.options.get(CONF_MANUAL_CONFIG, "") or ""
@@ -63,12 +65,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entry.async_on_unload(entry.add_update_listener(_options_updated))
     return True
 
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Nothing persistent to unload beyond unsubscribes handled by panel manager
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
-
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
     await hass.config_entries.async_reload(entry.entry_id)
