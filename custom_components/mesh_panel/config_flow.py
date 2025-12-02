@@ -27,9 +27,9 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_discovery(self, discovery_info=None) -> FlowResult:
+    async def async_step_discovery(self, user_input=None) -> FlowResult:
         # Called by __init__.py when we see smartpanel/announce
-        panel_id = (discovery_info or {}).get(CONF_PANEL_ID)
+        panel_id = (user_input or {}).get(CONF_PANEL_ID)
         if not panel_id:
             return self.async_abort(reason="unknown")
 
