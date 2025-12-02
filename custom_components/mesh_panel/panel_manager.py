@@ -4,10 +4,18 @@ import yaml
 from homeassistant.core import HomeAssistant, callback, Context
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import mqtt
+
+# --- FIXED IMPORTS BELOW ---
+from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_RGB_COLOR
 from homeassistant.const import (
-    SERVICE_TURN_ON, SERVICE_TURN_OFF, STATE_ON, STATE_OFF, 
-    ATTR_ENTITY_ID, ATTR_BRIGHTNESS, ATTR_RGB_COLOR
+    SERVICE_TURN_ON, 
+    SERVICE_TURN_OFF, 
+    STATE_ON, 
+    STATE_OFF, 
+    ATTR_ENTITY_ID
 )
+# ---------------------------
+
 from .const import CONF_PANEL_ID, CONF_LAYOUT, DEFAULT_LAYOUT
 
 _LOGGER = logging.getLogger(__name__)
