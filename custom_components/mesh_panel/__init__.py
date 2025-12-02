@@ -8,6 +8,7 @@ from .const import DOMAIN
 from .panel_manager import MeshPanelManager
 
 _LOGGER = logging.getLogger(__name__)
+PLATFORMS = ["binary_sensor"]
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
@@ -28,7 +29,7 @@ async def async_setup(hass: HomeAssistant, config: dict):
                 context={"source": "discovery"},
                 data={"panel_id": panel_id, "ip": p.get("ip")},
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _LOGGER.warning("mesh_panel announce error: %s", e)
 
     await mqtt.async_subscribe(hass, "smartpanel/announce", _on_announce)
@@ -39,11 +40,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     mgr = MeshPanelManager(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = mgr
     await mgr.async_setup()
+
+    # Ensure a clickable device page by adding a status entity
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     entry.async_on_unload(entry.add_update_listener(_update_listener))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     mgr: MeshPanelManager = hass.data[DOMAIN].pop(entry.entry_id)
     await mgr.async_unload()
     return True

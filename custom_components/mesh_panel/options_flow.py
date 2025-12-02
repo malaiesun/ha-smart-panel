@@ -1,246 +1,190 @@
+from __future__ import annotations
+
 import json
-import yaml
-import voluptuous as vol
 from typing import Any, Dict, List, Optional
 
+import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback, HomeAssistant
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.selector import (
-    selector,               # generic
-    TextSelector, TextSelectorConfig, TextSelectorType,
-)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.selector import selector, TextSelector, TextSelectorConfig, TextSelectorType
 
-from .const import DOMAIN, CONF_LAYOUT, DEFAULT_LAYOUT
+from .const import CONF_LAYOUT, DEFAULT_LAYOUT
 
-# ---------- helpers ----------
-def _coerce_layout(layout_str: str) -> dict:
-    if not layout_str or not layout_str.strip():
-        layout_str = DEFAULT_LAYOUT
+
+def _load_layout(raw: str) -> Dict[str, Any]:
     try:
-        return json.loads(layout_str)
-    except Exception:
-        pass
-    try:
-        return yaml.safe_load(layout_str)
+        data = json.loads(raw or DEFAULT_LAYOUT)
+        if isinstance(data, dict) and isinstance(data.get("devices"), list):
+            return data
     except Exception:
         pass
     return {"devices": []}
 
-def _dump_json_compact(d: dict) -> str:
+def _dump_layout(d: Dict[str, Any]) -> str:
     return json.dumps(d, ensure_ascii=False, indent=2)
 
-def _auto_controls_for_entity(hass: HomeAssistant, entity_id: str) -> List[Dict[str, Any]]:
-    """Generate sensible controls for common domains."""
-    domain = entity_id.split(".", 1)[0]
+def _pretty_label(entity_id: str) -> str:
+    base = entity_id.split(".", 1)[-1].replace("_", " ").strip()
+    return base[:1].upper() + base[1:]
+
+def _autogen(hass: HomeAssistant, entity_id: str) -> List[Dict[str, Any]]:
     st = hass.states.get(entity_id)
     attrs = st.attributes if st else {}
-
+    domain = entity_id.split(".", 1)[0]
     out: List[Dict[str, Any]] = []
 
-    # Base switch for on/off domains
-    if domain in ("light", "switch", "fan", "media_player", "climate", "cover"):
+    if domain in ("light", "switch", "fan", "media_player", "cover", "climate"):
         out.append({"label": "Power", "type": "switch", "entity": entity_id})
-
-    # Light brightness/color
     if domain == "light":
-        if "brightness" in attrs or "max_mireds" in attrs or "supported_color_modes" in attrs:
+        if "brightness" in attrs or "supported_color_modes" in attrs:
             out.append({"label": "Brightness", "type": "slider", "entity": entity_id, "min": 0, "max": 255, "step": 1})
-        # Color if RGB/HS is supported
-        scm = attrs.get("supported_color_modes", set())
-        if ("hs" in scm) or ("rgb" in scm) or ("xy" in scm) or ("color_temp" in scm) or ("hs_color" in attrs) or ("rgb_color" in attrs):
+        scm = set(attrs.get("supported_color_modes", []))
+        if scm.intersection({"hs", "rgb", "xy"}) or "rgb_color" in attrs or "hs_color" in attrs:
             out.append({"label": "Color", "type": "color", "entity": entity_id})
-
-    # Fan speed percentage
     if domain == "fan":
-        # Many fans expose percentage in attributes (or via set_percentage service)
         out.append({"label": "Speed", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
-
-    # Cover position
     if domain == "cover":
         out.append({"label": "Position", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
-
-    # Media player volume + source
     if domain == "media_player":
         out.append({"label": "Volume", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
         sources = attrs.get("source_list")
         if isinstance(sources, list) and sources:
             out.append({"label": "Source", "type": "select", "entity": entity_id, "options": "\n".join(map(str, sources))})
-
-    # Number/select direct mapping convenience (for “Gaming Setup” etc.)
     if domain in ("number", "input_number"):
-        out.append({"label": st.name if st else "Value", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
+        out.append({"label": _pretty_label(entity_id), "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
     if domain in ("select", "input_select"):
-        opts = st.attributes.get("options", [])
-        if opts:
-            out.append({"label": st.name if st else "Mode", "type": "select", "entity": entity_id, "options": "\n".join(map(str, opts))})
-
+        opts = attrs.get("options", [])
+        if isinstance(opts, list) and opts:
+            out.append({"label": _pretty_label(entity_id), "type": "select", "entity": entity_id, "options": "\n".join(map(str, opts))})
     return out
 
-# ---------- Options Flow ----------
+
 class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
+    """Single-page builder with simple actions."""
+
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self.entry = entry
-        self._layout: dict = _coerce_layout(entry.options.get(CONF_LAYOUT, DEFAULT_LAYOUT))
-        self._devices: List[dict] = list(self._layout.get("devices", []))
-        self._editing_index: Optional[int] = None
+        self._layout: Dict[str, Any] = _load_layout(entry.options.get(CONF_LAYOUT, DEFAULT_LAYOUT))
+        self._devices: List[Dict[str, Any]] = list(self._layout.get("devices", []))
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
-            if user_input["mode"] == "builder":
-                return await self.async_step_devices()
-            else:
-                # raw editor
-                return await self.async_step_raw()
+            act = user_input["action"]
+
+            # add device
+            if act == "add_device":
+                self._devices.append({
+                    "name": user_input["dev_name"].strip(),
+                    "icon": (user_input.get("dev_icon") or "settings").strip(),
+                    "state_entity": user_input.get("dev_state_entity") or "",
+                    "controls": [],
+                })
+
+            # autogen controls (append) for device index
+            elif act == "autogen":
+                di = user_input.get("dev_index")
+                ent = user_input.get("auto_entity")
+                if di not in (None, "") and ent:
+                    i = int(di)
+                    if 0 <= i < len(self._devices):
+                        self._devices[i].setdefault("controls", []).extend(_autogen(self.hass, ent))
+
+            # add manual control
+            elif act == "add_control":
+                di = user_input.get("dev_index")
+                if di not in (None, ""):
+                    i = int(di)
+                    if 0 <= i < len(self._devices):
+                        ctype = user_input["ctrl_type"]
+                        ent = user_input["ctrl_entity"]
+                        ctrl: Dict[str, Any] = {
+                            "label": user_input.get("ctrl_label") or _pretty_label(ent),
+                            "type": ctype,
+                            "entity": ent,
+                        }
+                        if ctype == "slider":
+                            ctrl.update({
+                                "min": int(user_input.get("ctrl_min", 0)),
+                                "max": int(user_input.get("ctrl_max", 100)),
+                                "step": int(user_input.get("ctrl_step", 1)),
+                            })
+                        if ctype == "select":
+                            ctrl["options"] = user_input.get("ctrl_options", "")
+                        self._devices[i].setdefault("controls", []).append(ctrl)
+
+            # delete device
+            elif act == "del_device":
+                di = user_input.get("dev_index")
+                if di not in (None, ""):
+                    i = int(di)
+                    if 0 <= i < len(self._devices):
+                        self._devices.pop(i)
+
+            # delete control
+            elif act == "del_control":
+                di = user_input.get("dev_index")
+                ci = user_input.get("ctrl_index")
+                if di not in (None, "") and ci not in (None, ""):
+                    i, j = int(di), int(ci)
+                    if 0 <= i < len(self._devices):
+                        ctrls = self._devices[i].get("controls", [])
+                        if 0 <= j < len(ctrls):
+                            ctrls.pop(j)
+
+            # save
+            elif act == "save":
+                return self.async_create_entry(title="", data={CONF_LAYOUT: _dump_layout({"devices": self._devices})})
+
+        # Build simple lists for selection
+        dev_opts = [str(i) for i in range(len(self._devices))]
+        ctrl_opts_for_dev0 = [str(i) for i in range(len(self._devices[0].get("controls", [])))] if self._devices else []
+
+        # Printable current config
+        listing = []
+        for i, d in enumerate(self._devices):
+            listing.append(f"{i}. {d.get('name','(unnamed)')}  [{len(d.get('controls',[]))} controls]")
+            for j, c in enumerate(d.get("controls", [])):
+                listing.append(f"   - {j}. {c.get('label','(no label)')} [{c.get('type')}] → {c.get('entity','')}")
+        summary = "\n".join(listing) or "No devices yet. Add one below."
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
-                vol.Required("mode", default="builder"): selector({
-                    "select": {
-                        "options": [
-                            {"label": "Visual Builder (Hybrid)", "value": "builder"},
-                            {"label": "Raw YAML/JSON", "value": "raw"},
-                        ]
-                    }
-                })
-            })
-        )
-
-    # ---- Raw editor (for power users / back-compat) ----
-    async def async_step_raw(self, user_input=None):
-        if user_input is not None:
-            # validate
-            try:
-                _coerce_layout(user_input[CONF_LAYOUT])  # raises if invalid
-            except Exception:
-                return self.async_show_form(
-                    step_id="raw",
-                    data_schema=vol.Schema({
-                        vol.Required(CONF_LAYOUT, default=user_input[CONF_LAYOUT]): TextSelector(TextSelectorConfig(multiline=True, type=TextSelectorType.TEXT))
-                    }),
-                    errors={"base": "invalid_yaml_json"}
-                )
-            return self.async_create_entry(title="", data={CONF_LAYOUT: user_input[CONF_LAYOUT]})
-
-        return self.async_show_form(
-            step_id="raw",
-            data_schema=vol.Schema({
-                vol.Required(CONF_LAYOUT, default=_dump_json_compact({"devices": self._devices})): TextSelector(
-                    TextSelectorConfig(multiline=True, type=TextSelectorType.TEXT)
-                )
-            })
-        )
-
-    # ---- Builder: device list ----
-    async def async_step_devices(self, user_input=None):
-        if user_input is not None:
-            action = user_input["action"]
-            if action == "add":
-                return await self.async_step_device_add()
-            idx = user_input.get("device_index")
-            if action == "edit" and idx is not None and 0 <= idx < len(self._devices):
-                self._editing_index = idx
-                return await self.async_step_device_edit()
-            if action == "delete" and idx is not None and 0 <= idx < len(self._devices):
-                self._devices.pop(idx)
-
-            if action == "save":
-                layout = {"devices": self._devices}
-                return self.async_create_entry(title="", data={CONF_LAYOUT: _dump_json_compact(layout)})
-
-        # Build choices
-        labels = [f'{i}. {d.get("name","(unnamed)")}  [{len(d.get("controls",[]))} controls]' for i, d in enumerate(self._devices)]
-        return self.async_show_form(
-            step_id="devices",
-            data_schema=vol.Schema({
-                vol.Optional("device_index"): selector({"select": {"options": [str(i) for i in range(len(self._devices))]}}) if self._devices else str,
+                # action
                 vol.Required("action", default="save"): selector({"select": {"options": [
-                    {"label": "Save & Apply", "value": "save"},
-                    {"label": "Add Device", "value": "add"},
-                    {"label": "Edit Selected", "value": "edit"},
-                    {"label": "Delete Selected", "value": "delete"},
-                ]}}),
-            }),
-            description_placeholders={
-                "devices": "\n".join(labels) if labels else "No devices yet. Add one!"
-            }
-        )
-
-    # ---- Builder: add device ----
-    async def async_step_device_add(self, user_input=None):
-        if user_input is not None:
-            name = user_input["name"].strip()
-            icon = user_input.get("icon", "").strip() or "settings"
-            state_entity = user_input.get("state_entity") or ""
-            dev = {"name": name, "icon": icon, "state_entity": state_entity, "controls": []}
-            self._devices.append(dev)
-            self._editing_index = len(self._devices) - 1
-            return await self.async_step_device_edit()
-
-        return self.async_show_form(
-            step_id="device_add",
-            data_schema=vol.Schema({
-                vol.Required("name"): str,
-                vol.Optional("icon", default="settings"): str,
-                vol.Optional("state_entity"): selector({"entity": {}}),  # any domain allowed
-            })
-        )
-
-    # ---- Builder: edit device (add auto/manual controls) ----
-    async def async_step_device_edit(self, user_input=None):
-        dev = self._devices[self._editing_index]
-
-        if user_input is not None:
-            act = user_input["action"]
-            if act == "auto":
-                entity_id = user_input["entity_auto"]
-                dev["controls"].extend(_auto_controls_for_entity(self.hass, entity_id))
-            elif act == "manual":
-                ctrl = {
-                    "label": user_input["label"],
-                    "type": user_input["type"],
-                    "entity": user_input["entity_manual"],
-                }
-                if ctrl["type"] == "slider":
-                    ctrl["min"] = int(user_input.get("min", 0))
-                    ctrl["max"] = int(user_input.get("max", 100))
-                    ctrl["step"] = int(user_input.get("step", 1))
-                if ctrl["type"] == "select":
-                    ctrl["options"] = user_input.get("options", "")
-                dev["controls"].append(ctrl)
-            elif act == "done":
-                return await self.async_step_devices()
-
-        # UI
-        return self.async_show_form(
-            step_id="device_edit",
-            data_schema=vol.Schema({
-                vol.Required("action", default="auto"): selector({"select": {"options": [
-                    {"label": "Add Auto-Generated Controls from Entity", "value": "auto"},
-                    {"label": "Add Manual Control", "value": "manual"},
-                    {"label": "Done", "value": "done"},
+                    {"label": "💾 Save & Apply", "value": "save"},
+                    {"label": "➕ Add Device", "value": "add_device"},
+                    {"label": "⚡ Auto-Generate Controls (Append)", "value": "autogen"},
+                    {"label": "➕ Add Control (Manual)", "value": "add_control"},
+                    {"label": "🗑 Delete Device", "value": "del_device"},
+                    {"label": "🗑 Delete Control", "value": "del_control"},
                 ]}}),
 
-                # Auto section
-                vol.Optional("entity_auto"): selector({"entity": {}}),
+                # device-level inputs
+                vol.Optional("dev_name"): str,
+                vol.Optional("dev_icon", default="settings"): str,
+                vol.Optional("dev_state_entity"): selector({"entity": {}}),
 
-                # Manual section
-                vol.Optional("label"): str,
-                vol.Optional("type"): selector({"select": {"options": [
+                # indexes for actions on existing
+                vol.Optional("dev_index"): selector({"select": {"options": dev_opts}}) if dev_opts else str,
+                vol.Optional("ctrl_index"): selector({"select": {"options": ctrl_opts_for_dev0}}) if ctrl_opts_for_dev0 else str,
+
+                # autogen target
+                vol.Optional("auto_entity"): selector({"entity": {}}),
+
+                # control inputs
+                vol.Optional("ctrl_label"): str,
+                vol.Optional("ctrl_type", default="switch"): selector({"select": {"options": [
                     {"label": "Switch", "value": "switch"},
                     {"label": "Slider", "value": "slider"},
                     {"label": "Color",  "value": "color"},
                     {"label": "Select", "value": "select"},
                 ]}}),
-                vol.Optional("entity_manual"): selector({"entity": {}}),
-                vol.Optional("min", default=0): int,
-                vol.Optional("max", default=100): int,
-                vol.Optional("step", default=1): int,
-                vol.Optional("options", default=""): TextSelector(TextSelectorConfig(multiline=True, type=TextSelectorType.TEXT)),
+                vol.Optional("ctrl_entity"): selector({"entity": {}}),
+                vol.Optional("ctrl_min", default=0): int,
+                vol.Optional("ctrl_max", default=100): int,
+                vol.Optional("ctrl_step", default=1): int,
+                vol.Optional("ctrl_options", default=""): TextSelector(TextSelectorConfig(multiline=True, type=TextSelectorType.TEXT)),
             }),
-            description_placeholders={
-                "device": f'{dev.get("name")} ({dev.get("icon")})',
-                "controls": _dump_json_compact({"controls": dev.get("controls", [])})
-            }
+            description_placeholders={"devices": summary},
         )

@@ -17,7 +17,6 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data={CONF_PANEL_ID: user_input[CONF_PANEL_ID]},
                 options={CONF_LAYOUT: DEFAULT_LAYOUT},
             )
-
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
@@ -41,5 +40,5 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        from .options_flow import MeshPanelOptionsFlowHandler  # lazy import to avoid cycles
+        from .options_flow import MeshPanelOptionsFlowHandler  # lazy import
         return MeshPanelOptionsFlowHandler(config_entry)
