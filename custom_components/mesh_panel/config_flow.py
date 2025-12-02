@@ -3,7 +3,10 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 from .const import DOMAIN, CONF_PANEL_ID
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for MESH Panel."""
+    # This line is critical to fix 'Invalid handler specified'
+    DOMAIN = DOMAIN 
     VERSION = 1
 
     async def async_step_user(self, user_input=None) -> FlowResult:

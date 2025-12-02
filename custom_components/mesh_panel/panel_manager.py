@@ -58,7 +58,8 @@ class MeshPanelController:
             await mqtt.async_publish(self.hass, self.topic_notify, json.dumps(payload))
 
         svc_name = f"notify_{self.panel_id}".replace("-", "_")
-        self.hass.services.async_register("mesh_panel", svc_name, _notify)
+        if not self.hass.services.has_service("mesh_panel", svc_name):
+            self.hass.services.async_register("mesh_panel", svc_name, _notify)
 
     async def publish_ui(self):
         payload = {"devices": self.devices_config}
@@ -112,11 +113,9 @@ class MeshPanelController:
                 service_data[ATTR_RGB_COLOR] = data["rgb_color"]
 
             elif "option" in data:
-                # generic select
                 service = "select_option"
                 service_data["option"] = data["option"]
                 if domain == "media_player":
-                    # media_player uses select_source instead
                     service = "select_source"
                     service_data = {"entity_id": entity_id, "source": data["option"]}
 
