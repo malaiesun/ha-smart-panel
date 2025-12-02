@@ -1,177 +1,286 @@
-import logging
+from __future__ import annotations
+
 import json
-import yaml
-from homeassistant.core import HomeAssistant, callback, Context
-from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.typing import StateType
-from homeassistant.components import mqtt
-from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_RGB_COLOR
-from homeassistant.const import (
-    SERVICE_TURN_ON,
-    SERVICE_TURN_OFF,
-    ATTR_ENTITY_ID,
+from typing import Any, Dict, List, Optional
+
+import voluptuous as vol
+from homeassistant import config_entries
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.selector import (
+    selector,
+    TextSelector, TextSelectorConfig, TextSelectorType,
 )
 
-from .const import CONF_PANEL_ID, CONF_LAYOUT, DEFAULT_LAYOUT
+from .const import CONF_LAYOUT, DEFAULT_LAYOUT
 
-_LOGGER = logging.getLogger(__name__)
 
-def _coerce_layout(layout_str: str) -> dict:
-    """Accept JSON or YAML, return dict with {'devices': [...]}."""
-    if not layout_str or not layout_str.strip():
-        layout_str = DEFAULT_LAYOUT
+# ---------- helpers ----------
+def _load_layout(raw: str) -> Dict[str, Any]:
     try:
-        # Try JSON first
-        data = json.loads(layout_str)
-        if isinstance(data, dict):
+        data = json.loads(raw or DEFAULT_LAYOUT)
+        if isinstance(data, dict) and "devices" in data and isinstance(data["devices"], list):
             return data
-    except Exception:
-        pass
-    try:
-        data = yaml.safe_load(layout_str)
-        if isinstance(data, dict):
-            return data
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return {"devices": []}
 
-class MeshPanelManager:
-    def __init__(self, hass: HomeAssistant, entry):
-        self.hass = hass
-        self.entry = entry
-        self.panel_id = entry.data[CONF_PANEL_ID]
-        self.layout_raw = entry.options.get(CONF_LAYOUT, DEFAULT_LAYOUT)
-        self.entities_to_watch = set()
-        self._unsub = []
-        self._mqtt_unsub = None
 
-    async def async_setup(self):
-        cfg = _coerce_layout(self.layout_raw)
-        devices = cfg.get("devices", [])
+def _dump_layout(layout: Dict[str, Any]) -> str:
+    return json.dumps(layout, ensure_ascii=False, separators=(",", ":"), indent=2)
 
-        # collect entities to watch
-        self.entities_to_watch.clear()
-        for dev in devices:
-            se = dev.get("state_entity")
-            if se:
-                self.entities_to_watch.add(se)
-            for c in dev.get("controls", []):
-                ent = c.get("entity")
-                if ent:
-                    self.entities_to_watch.add(ent)
 
-        # subscribe to actions
-        topic = f"smartpanel/{self.panel_id}/action"
-        self._mqtt_unsub = await mqtt.async_subscribe(self.hass, topic, self._handle_action)
+def _pretty_label_from_entity(entity_id: str) -> str:
+    # "light.table_lamp" -> "Table Lamp"
+    base = entity_id.split(".", 1)[-1].replace("_", " ").strip()
+    return base[:1].upper() + base[1:]
 
-        # listen entity state changes
-        if self.entities_to_watch:
-            self._unsub.append(
-                async_track_state_change_event(
-                    self.hass, list(self.entities_to_watch), self._handle_state_event
-                )
+
+def _autogen_controls(hass: HomeAssistant, entity_id: str) -> List[Dict[str, Any]]:
+    """Append-friendly control suggestions. Never destructive."""
+    st = hass.states.get(entity_id)
+    attrs = st.attributes if st else {}
+    domain = entity_id.split(".", 1)[0]
+
+    controls: List[Dict[str, Any]] = []
+
+    # Always a power switch for common domains
+    if domain in ("light", "switch", "fan", "media_player", "cover", "climate"):
+        controls.append({"label": "Power", "type": "switch", "entity": entity_id})
+
+    if domain == "light":
+        if "brightness" in attrs or "supported_color_modes" in attrs:
+            controls.append(
+                {"label": "Brightness", "type": "slider", "entity": entity_id, "min": 0, "max": 255, "step": 1}
             )
+        scm = set(attrs.get("supported_color_modes", []))
+        if scm.intersection({"hs", "rgb", "xy"}) or "rgb_color" in attrs or "hs_color" in attrs:
+            controls.append({"label": "Color", "type": "color", "entity": entity_id})
 
-        # publish UI (retain)
-        await mqtt.async_publish(self.hass, f"smartpanel/{self.panel_id}/ui", json.dumps(cfg), retain=True)
+    if domain == "fan":
+        controls.append({"label": "Speed", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
 
-        # push current state for all entities
-        for ent in self.entities_to_watch:
-            s = self.hass.states.get(ent)
-            if s:
-                await self._push_state(ent, s.state, s.attributes)
+    if domain == "cover":
+        controls.append({"label": "Position", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
 
-    async def async_unload(self):
-        if self._mqtt_unsub:
-            self._mqtt_unsub()
-        for u in self._unsub:
-            try:
-                u()
-            except Exception:
-                pass
-        self._unsub.clear()
+    if domain == "media_player":
+        controls.append({"label": "Volume", "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
+        sources = attrs.get("source_list")
+        if isinstance(sources, list) and sources:
+            controls.append({"label": "Source", "type": "select", "entity": entity_id, "options": "\n".join(map(str, sources))})
 
-    # ---------- inbound actions from panel ----------
-    async def _handle_action(self, msg):
-        try:
-            data = json.loads(msg.payload or "{}")
-        except Exception:
-            return
+    if domain in ("number", "input_number"):
+        controls.append({"label": _pretty_label_from_entity(entity_id), "type": "slider", "entity": entity_id, "min": 0, "max": 100, "step": 1})
 
-        entity_id = data.get("id")
-        if not entity_id:
-            return
+    if domain in ("select", "input_select"):
+        opts = attrs.get("options", [])
+        if isinstance(opts, list) and opts:
+            controls.append({"label": _pretty_label_from_entity(entity_id), "type": "select", "entity": entity_id, "options": "\n".join(map(str, opts))})
 
-        domain = entity_id.split(".", 1)[0]
-        service = None
-        service_data = {ATTR_ENTITY_ID: entity_id}
+    return controls
 
-        if "state" in data:
-            service = SERVICE_TURN_ON if str(data["state"]).lower() == "on" else SERVICE_TURN_OFF
 
-        elif "value" in data:
-            val = int(data["value"])
-            if domain == "light":
-                service = SERVICE_TURN_ON
-                service_data[ATTR_BRIGHTNESS] = val
-            elif domain == "fan":
-                # Prefer percentage/oscillation if available, fall back to turn_on
-                service = SERVICE_TURN_ON
-                service_data["percentage"] = val
-            elif domain == "cover":
-                service = "set_cover_position"
-                service_data["position"] = val
-            elif domain in ("number", "input_number"):
-                service = "set_value"
-                service_data["value"] = val
-            elif domain == "media_player":
-                service = "volume_set"
-                service_data["volume_level"] = val / 100.0
+# ---------- Options Flow ----------
+class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
+    """Clean tab-style builder; unlimited devices and controls."""
 
-        elif "rgb_color" in data:
-            if domain == "light":
-                service = SERVICE_TURN_ON
-                service_data[ATTR_RGB_COLOR] = data["rgb_color"]
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self.entry = entry
+        self._layout: Dict[str, Any] = _load_layout(entry.options.get(CONF_LAYOUT, DEFAULT_LAYOUT))
+        self._devices: List[Dict[str, Any]] = list(self._layout.get("devices", []))
+        self._edit_idx: Optional[int] = None
+        self._edit_ctrl_idx: Optional[int] = None
 
-        elif "option" in data:
-            if domain in ("select", "input_select"):
-                service = "select_option"
-                service_data["option"] = data["option"]
-            elif domain == "media_player":
-                service = "select_source"
-                service_data = {"entity_id": entity_id, "source": data["option"]}
+    # --- root: device list ---
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            action = user_input["action"]
+            idx_str = user_input.get("device_index")
+            idx = int(idx_str) if idx_str not in (None, "") else None
 
-        if service:
-            await self.hass.services.async_call(domain, service, service_data, blocking=False, context=Context())
+            if action == "add":
+                return await self.async_step_device_add()
+            if action == "edit" and idx is not None and 0 <= idx < len(self._devices):
+                self._edit_idx = idx
+                return await self.async_step_device_edit()
+            if action == "delete" and idx is not None and 0 <= idx < len(self._devices):
+                self._devices.pop(idx)
+            if action == "save":
+                layout = {"devices": self._devices}
+                return self.async_create_entry(title="", data={CONF_LAYOUT: _dump_layout(layout)})
 
-    # ---------- push updates to panel ----------
-    @callback
-    async def _handle_state_event(self, event):
-        s = event.data.get("new_state")
-        if not s:
-            return
-        await self._push_state(event.data["entity_id"], s.state, s.attributes)
+        options = [str(i) for i in range(len(self._devices))]
+        listing = "\n".join(
+            f"{i}. {d.get('name','(unnamed)')}  [{len(d.get('controls',[]))} controls]"
+            for i, d in enumerate(self._devices)
+        ) or "No devices yet. Click Add."
 
-    async def _push_state(self, entity_id: str, state: StateType, attrs: dict):
-        topic = f"smartpanel/{self.panel_id}/state"
-        payload = {"entity": entity_id, "state": state}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Optional("device_index"): selector({"select": {"options": options}}) if options else str,
+                vol.Required("action", default="save"): selector({"select": {"options": [
+                    {"label": "💾 Save & Apply", "value": "save"},
+                    {"label": "➕ Add Device", "value": "add"},
+                    {"label": "✏️ Edit Selected", "value": "edit"},
+                    {"label": "🗑 Delete Selected", "value": "delete"},
+                ]}})
+            }),
+            description_placeholders={"devices": listing},
+        )
 
-        if ATTR_BRIGHTNESS in attrs:
-            payload["value"] = int(attrs[ATTR_BRIGHTNESS])
-        elif "current_position" in attrs:
-            payload["value"] = int(attrs["current_position"])
-        elif "volume_level" in attrs:
-            try:
-                payload["value"] = int(float(attrs["volume_level"]) * 100)
-            except Exception:
-                pass
+    # --- device add ---
+    async def async_step_device_add(self, user_input=None):
+        if user_input is not None:
+            dev = {
+                "name": user_input["name"].strip(),
+                "icon": user_input.get("icon", "settings").strip() or "settings",
+                "state_entity": user_input.get("state_entity") or "",
+                "controls": [],
+            }
+            self._devices.append(dev)
+            self._edit_idx = len(self._devices) - 1
+            return await self.async_step_device_edit()
 
-        # color
-        if ATTR_RGB_COLOR in attrs:
-            try:
-                r, g, b = attrs[ATTR_RGB_COLOR]
-                payload["rgb_color"] = [int(r), int(g), int(b)]
-            except Exception:
-                pass
+        return self.async_show_form(
+            step_id="device_add",
+            data_schema=vol.Schema({
+                vol.Required("name"): str,
+                vol.Optional("icon", default="settings"): str,
+                vol.Optional("state_entity"): selector({"entity": {}}),
+            }),
+        )
 
-        await mqtt.async_publish(self.hass, topic, json.dumps(payload))
+    # --- device edit ---
+    async def async_step_device_edit(self, user_input=None):
+        dev = self._devices[self._edit_idx]
+
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "autogen":
+                ent = user_input.get("autogen_entity")
+                if ent:
+                    dev["controls"].extend(_autogen_controls(self.hass, ent))
+            elif action == "addctrl":
+                return await self.async_step_control_add()
+            elif action == "editctrl":
+                sel = user_input.get("control_index")
+                if sel not in (None, ""):
+                    idx = int(sel)
+                    if 0 <= idx < len(dev["controls"]):
+                        self._edit_ctrl_idx = idx
+                        return await self.async_step_control_edit()
+            elif action == "delctrl":
+                sel = user_input.get("control_index")
+                if sel not in (None, ""):
+                    idx = int(sel)
+                    if 0 <= idx < len(dev["controls"]):
+                        dev["controls"].pop(idx)
+            elif action == "done":
+                return await self.async_step_init()
+
+        ctrl_labels = [f'{i}. {c.get("label","(no label)")} [{c.get("type")}] → {c.get("entity","")}'
+                       for i, c in enumerate(dev.get("controls", []))]
+        options = [str(i) for i in range(len(dev.get("controls", [])))]
+
+        return self.async_show_form(
+            step_id="device_edit",
+            data_schema=vol.Schema({
+                vol.Required("action", default="autogen"): selector({"select": {"options": [
+                    {"label": "⚡ Auto-Generate Controls from Entity", "value": "autogen"},
+                    {"label": "➕ Add Control (Manual)", "value": "addctrl"},
+                    {"label": "✏️ Edit Selected Control", "value": "editctrl"},
+                    {"label": "🗑 Delete Selected Control", "value": "delctrl"},
+                    {"label": "✔ Done", "value": "done"},
+                ]}}),
+                vol.Optional("autogen_entity"): selector({"entity": {}}),
+                vol.Optional("control_index"): selector({"select": {"options": options}}) if options else str,
+            }),
+            description_placeholders={
+                "device": f'{dev.get("name")} ({dev.get("icon","settings")})',
+                "controls": "\n".join(ctrl_labels) or "No controls yet.",
+            },
+        )
+
+    # --- control add ---
+    async def async_step_control_add(self, user_input=None):
+        if user_input is not None:
+            ent = user_input["entity"]
+            ctype = user_input["type"]
+            ctrl: Dict[str, Any] = {
+                "label": user_input.get("label") or _pretty_label_from_entity(ent),
+                "type": ctype,
+                "entity": ent,
+            }
+            if ctype == "slider":
+                ctrl.update({
+                    "min": int(user_input.get("min", 0)),
+                    "max": int(user_input.get("max", 100)),
+                    "step": int(user_input.get("step", 1)),
+                })
+            if ctype == "select":
+                ctrl["options"] = user_input.get("options", "")
+            self._devices[self._edit_idx]["controls"].append(ctrl)
+            return await self.async_step_device_edit()
+
+        return self._control_form("control_add")
+
+    # --- control edit ---
+    async def async_step_control_edit(self, user_input=None):
+        dev = self._devices[self._edit_idx]
+        ctrl = dev["controls"][self._edit_ctrl_idx]
+
+        if user_input is not None:
+            ent = user_input["entity"]
+            ctype = user_input["type"]
+            ctrl.update({
+                "label": user_input.get("label") or _pretty_label_from_entity(ent),
+                "type": ctype,
+                "entity": ent,
+            })
+            if ctype == "slider":
+                ctrl.update({
+                    "min": int(user_input.get("min", 0)),
+                    "max": int(user_input.get("max", 100)),
+                    "step": int(user_input.get("step", 1)),
+                })
+                ctrl.pop("options", None)
+            elif ctype == "select":
+                ctrl["options"] = user_input.get("options", "")
+                ctrl.pop("min", None)
+                ctrl.pop("max", None)
+                ctrl.pop("step", None)
+            else:
+                ctrl.pop("min", None)
+                ctrl.pop("max", None)
+                ctrl.pop("step", None)
+                ctrl.pop("options", None)
+
+            return await self.async_step_device_edit()
+
+        return self._control_form(
+            "control_edit",
+            defaults=ctrl,
+        )
+
+    # --- common control form builder ---
+    def _control_form(self, step_id: str, defaults: Optional[Dict[str, Any]] = None):
+        defaults = defaults or {}
+        schema = vol.Schema({
+            vol.Optional("label", default=defaults.get("label", "")): str,
+            vol.Required("type", default=defaults.get("type", "switch")): selector({
+                "select": {"options": [
+                    {"label": "Switch", "value": "switch"},
+                    {"label": "Slider", "value": "slider"},
+                    {"label": "Color",  "value": "color"},
+                    {"label": "Select", "value": "select"},
+                ]}
+            }),
+            vol.Required("entity", default=defaults.get("entity")): selector({"entity": {}}),
+            vol.Optional("min",  default=defaults.get("min", 0)): int,
+            vol.Optional("max",  default=defaults.get("max", 100)): int,
+            vol.Optional("step", default=defaults.get("step", 1)): int,
+            vol.Optional("options", default=defaults.get("options", "")): TextSelector(
+                TextSelectorConfig(multiline=True, type=TextSelectorType.TEXT)
+            ),
+        })
+        return self.async_show_form(step_id=step_id, data_schema=schema)

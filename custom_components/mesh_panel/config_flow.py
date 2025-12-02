@@ -1,12 +1,9 @@
-import logging
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
 from .const import DOMAIN, CONF_PANEL_ID, CONF_LAYOUT, DEFAULT_LAYOUT
-from .options_flow import MeshPanelOptionsFlowHandler  # <-- import the builder
 
-_LOGGER = logging.getLogger(__name__)
 
 class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -18,7 +15,7 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(
                 title=user_input["name"],
                 data={CONF_PANEL_ID: user_input[CONF_PANEL_ID]},
-                options={CONF_LAYOUT: DEFAULT_LAYOUT}
+                options={CONF_LAYOUT: DEFAULT_LAYOUT},
             )
 
         return self.async_show_form(
@@ -38,10 +35,11 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=f"Mesh Panel ({panel_id})",
             data={CONF_PANEL_ID: panel_id},
-            options={CONF_LAYOUT: DEFAULT_LAYOUT}
+            options={CONF_LAYOUT: DEFAULT_LAYOUT},
         )
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
+        from .options_flow import MeshPanelOptionsFlowHandler  # lazy import to avoid cycles
         return MeshPanelOptionsFlowHandler(config_entry)
