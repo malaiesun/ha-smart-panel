@@ -1,28 +1,28 @@
-# 🎛️ ESP32 Smart Panel - Home Assistant Integration
+# ESP32 Smart Panel - Home Assistant Integration
 
 A custom integration to control the **CrowPanel ESP32 HMI Display**.
 It allows you to define a "Virtual Device Panel" using YAML inside Home Assistant, which is then rendered dynamically on the screen via MQTT.
 
-## ✨ Features
+## Features
 * **Auto-Discovery:** No coding on the ESP32 required after flashing.
 * **Live Updates:** Two-way synchronization. Change a slider on the panel, HA updates. Change HA, the panel updates.
 * **Supported Controls:** Switches, Sliders (Brightness/Volume/Temp), Dropdowns (Input Select/Sources), and RGB Color Pickers.
 * **Notifications:** Send "Toast" popups to the screen via Automations.
 
-## 📦 Installation (HACS)
+## Installation (HACS)
 1.  Go to **HACS > Integrations**.
 2.  Click the 3 dots > **Custom Repositories**.
 3.  Add this repository URL.
 4.  Category: **Integration**.
 5.  Click **Download** and restart Home Assistant.
 
-## ⚙️ Configuration
+## Configuration
 1.  Go to **Settings > Devices & Services > Add Integration**.
 2.  Search for **ESP32 Smart Panel**.
 3.  Enter your **MQTT Topic Base** (default: `smartpanel/panel_01`).
 4.  **Device Setup:** Paste your YAML configuration.
 
-### 📝 Example Configuration YAML
+### Example Configuration YAML
 Paste this into the setup window:
 
 ```yaml
