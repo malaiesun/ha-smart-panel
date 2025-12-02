@@ -1,18 +1,13 @@
-send_notification:
-  name: Send Notification (deprecated)
-  description: Sends a toast to all panels (use mesh_panel.notify_<panel_id> instead).
+# Describes the format for MESH Panel services.
+notify:
+  description: "Sends a notification to a specific MESH panel."
   fields:
     title:
-      name: Title
-      example: "Doorbell"
+      description: "Title of the notification."
+      example: "Hello"
     message:
-      name: Message
-      example: "Ding dong!"
+      description: "Message of the notification."
+      example: "World!"
     duration:
-      name: Duration (ms)
-      default: 5000
-      selector:
-        number:
-          min: 1000
-          max: 60000
-          unit_of_measurement: ms
+      description: "Duration of the notification in milliseconds."
+      example: 5000

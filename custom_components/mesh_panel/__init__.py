@@ -1,3 +1,4 @@
+"""The MESH Smart Home Panel integration."""
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -9,7 +10,9 @@ import json
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup(hass: HomeAssistant, config):
+    """Set up the MESH Smart Home Panel integration."""
     async def _announce(msg):
+        """Handle a discovered panel."""
         try:
             data = json.loads(msg.payload or "{}")
             panel_id = data.get("panel_id")
@@ -17,13 +20,15 @@ async def async_setup(hass: HomeAssistant, config):
                 await hass.config_entries.flow.async_init(
                     DOMAIN, context={"source": "mqtt"}, data={CONF_PANEL_ID: panel_id}
                 )
-        except: pass
+        except Exception as e:
+            _LOGGER.warning("Could not parse MQTT discovery message: %s", e)
+    
     await mqtt.async_subscribe(hass, TOPIC_ANNOUNCE, _announce)
     return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Set up MESH panel from a config entry."""
     panel_id = entry.data[CONF_PANEL_ID]
-    # GET CONFIG FROM VISUAL EDITOR STORAGE
     devices_data = entry.options.get(CONF_DEVICES, []) 
 
     ctrl = MeshPanelController(hass, panel_id, devices_data)
@@ -31,13 +36,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ctrl
     
-    # Reload when options change (Visual Editor save)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    hass.data[DOMAIN].pop(entry.entry_id, None)
+    """Unload a config entry."""
+    ctrl = hass.data[DOMAIN].pop(entry.entry_id, None)
+    if ctrl:
+        await ctrl.stop()
     return True
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    await async_setup_entry(hass, entry)

@@ -1,9 +1,9 @@
+"""Config flow for MESH Smart Home Panel."""
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from .const import DOMAIN, CONF_PANEL_ID, CONF_DEVICES
-
 from .options_flow import MeshPanelOptionsFlowHandler
 
 @config_entries.HANDLERS.register(DOMAIN)
@@ -14,9 +14,11 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
+        """Get the options flow for this handler."""
         return MeshPanelOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input=None) -> FlowResult:
+        """Handle the initial step."""
         errors = {}
         if user_input is not None:
             panel_id = user_input[CONF_PANEL_ID].strip()
@@ -35,6 +37,7 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_mqtt(self, discovery_info=None) -> FlowResult:
+        """Handle discovery via MQTT."""
         panel_id = (discovery_info or {}).get(CONF_PANEL_ID)
         if not panel_id:
             return self.async_abort(reason="unknown")

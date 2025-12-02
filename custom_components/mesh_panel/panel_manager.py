@@ -1,7 +1,6 @@
+"""Manages a MESH panel."""
 import json
 import logging
-import yaml
-
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import mqtt
 from homeassistant.const import (
@@ -10,19 +9,16 @@ from homeassistant.const import (
     ATTR_ENTITY_ID
 )
 from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_RGB_COLOR
-
 from homeassistant.helpers.event import async_track_state_change_event
-
-from .const import (
-    CONF_PANEL_ID,
-    TOPIC_BASE_FMT, TOPIC_UI_FMT, TOPIC_STATE_FMT, TOPIC_ACTION_FMT, TOPIC_NOTIFY_FMT,
-    CONF_DEVICES
-)
+from .const import *
 
 _LOGGER = logging.getLogger(__name__)
 
 class MeshPanelController:
+    """Controller for a MESH panel."""
+
     def __init__(self, hass: HomeAssistant, panel_id: str, devices_data: list):
+        """Initialize the controller."""
         self.hass = hass
         self.panel_id = panel_id
         self.topic_ui = TOPIC_UI_FMT.format(panel_id=panel_id)
@@ -37,6 +33,7 @@ class MeshPanelController:
         self._watched = set()
 
     async def start(self):
+        """Start the controller."""
         async def _on_action(msg):
             await self._handle_action(msg.payload)
 
@@ -51,11 +48,20 @@ class MeshPanelController:
         await self.publish_ui()
         await self._register_services()
 
+    async def stop(self):
+        """Stop the controller."""
+        if self._unsub_action:
+            self._unsub_action()
+        if self._state_unsub:
+            self._state_unsub()
+
     async def publish_ui(self):
+        """Publish the UI configuration to the panel."""
         payload = {"devices": self.devices_config}
         await mqtt.async_publish(self.hass, self.topic_ui, json.dumps(payload), retain=True)
 
     def _collect_watched_entities(self):
+        """Collect all entities to watch for state changes."""
         self._watched.clear()
         for dev in self.devices_config:
             if dev.get("state_entity"):
@@ -65,6 +71,7 @@ class MeshPanelController:
                     self._watched.add(control["entity"])
 
     async def _register_services(self):
+        """Register the notify service."""
         async def _notify(call):
             payload = {
                 "title": call.data.get("title", "Info"),
@@ -74,10 +81,11 @@ class MeshPanelController:
             await mqtt.async_publish(self.hass, self.topic_notify, json.dumps(payload))
 
         svc_name = f"notify_{self.panel_id}".replace("-", "_")
-        if not self.hass.services.has_service("mesh_panel", svc_name):
-            self.hass.services.async_register("mesh_panel", svc_name, _notify)
+        if not self.hass.services.has_service(DOMAIN, svc_name):
+            self.hass.services.async_register(DOMAIN, svc_name, _notify)
 
     async def _handle_action(self, payload: str):
+        """Handle an action from the panel."""
         try:
             data = json.loads(payload or "{}")
             entity_id = data.get("id")
@@ -94,21 +102,37 @@ class MeshPanelController:
                 if domain == "light":
                     service = SERVICE_TURN_ON
                     service_data[ATTR_BRIGHTNESS] = val
+                elif domain == "fan":
+                    service = "set_percentage"
+                    service_data["percentage"] = val
                 elif domain == "media_player":
                     service = "volume_set"
                     service_data["volume_level"] = val / 100.0
+                elif domain == "climate":
+                    service = "set_temperature"
+                    service_data["temperature"] = val
                 else:
                     service = "set_value"
                     service_data["value"] = val
-            
+            elif "rgb_color" in data:
+                service = SERVICE_TURN_ON
+                service_data[ATTR_RGB_COLOR] = data["rgb_color"]
+            elif "option" in data:
+                service = "select_option"
+                service_data["option"] = data["option"]
+                if domain == "media_player":
+                    service = "select_source"
+                    service_data["source"] = data["option"]
+
             if service:
                 await self.hass.services.async_call(domain, service, service_data)
 
         except Exception as e:
-            _LOGGER.error("Action Error: %s", e)
+            _LOGGER.error("Action error: %s", e)
 
     @callback
-    async def _handle_state_event(self, event):
+    def _handle_state_event(self, event):
+        """Handle a state change event."""
         s = event.data.get("new_state")
         if not s: return
 
@@ -124,4 +148,6 @@ class MeshPanelController:
         if ATTR_RGB_COLOR in attrs:
             payload["rgb_color"] = attrs[ATTR_RGB_COLOR]
 
-        await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
+        self.hass.async_create_task(
+            mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
+        )
