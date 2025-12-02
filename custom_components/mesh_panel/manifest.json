@@ -2,11 +2,13 @@
   "domain": "mesh_panel",
   "name": "MESH Smart Home Panel",
   "version": "1.0.0",
-  "codeowners": ["@malaiesun"],
+  "codeowners": ["malaiesun.com"],
   "config_flow": true,
   "documentation": "https://github.com/malaiesun/ha-mesh-panel",
   "issue_tracker": "https://github.com/malaiesun/ha-mesh-panel/issues",
   "iot_class": "local_push",
   "dependencies": ["mqtt"],
-  "requirements": []
+  "requirements": [],
+  "icon": "icon.png",
+  "logo": "logo.png"
 }
