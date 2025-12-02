@@ -64,11 +64,17 @@ class MeshPanelController:
         """Collect all entities to watch for state changes."""
         self._watched.clear()
         for dev in self.devices_config:
-            if dev.get("state_entity"):
-                self._watched.add(dev["state_entity"])
             for control in dev.get("controls", []):
                 if control.get("entity"):
                     self._watched.add(control["entity"])
+
+    def _find_control(self, entity_id):
+        """Find a control by its entity ID."""
+        for dev in self.devices_config:
+            for control in dev.get("controls", []):
+                if control.get("entity") == entity_id:
+                    return control
+        return None
 
     async def _register_services(self):
         """Register the notify service."""
@@ -91,6 +97,9 @@ class MeshPanelController:
             entity_id = data.get("id")
             if not entity_id: return
 
+            control = self._find_control(entity_id)
+            if not control: return
+
             domain = entity_id.split(".")[0]
             service_data = {ATTR_ENTITY_ID: entity_id}
             service = None
@@ -99,7 +108,11 @@ class MeshPanelController:
                 service = SERVICE_TURN_ON if data["state"] == "on" else SERVICE_TURN_OFF
             elif "value" in data:
                 val = int(data["value"])
-                if domain == "light":
+                attribute = control.get("attribute")
+                if attribute and attribute != "state":
+                    service = f"set_{attribute}"
+                    service_data[attribute] = val
+                elif domain == "light":
                     service = SERVICE_TURN_ON
                     service_data[ATTR_BRIGHTNESS] = val
                 elif domain == "fan":
@@ -137,17 +150,22 @@ class MeshPanelController:
         if not s: return
 
         entity_id = event.data["entity_id"]
-        attrs = s.attributes
         
-        payload = {"entity": entity_id, "state": s.state}
-        
-        if ATTR_BRIGHTNESS in attrs:
-            payload["value"] = attrs[ATTR_BRIGHTNESS]
-        if "volume_level" in attrs:
-            payload["value"] = int(attrs["volume_level"] * 100)
-        if ATTR_RGB_COLOR in attrs:
-            payload["rgb_color"] = attrs[ATTR_RGB_COLOR]
-
-        self.hass.async_create_task(
-            mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
-        )
+        for dev in self.devices_config:
+            for control in dev.get("controls", []):
+                if control.get("entity") == entity_id:
+                    payload = {"entity": entity_id}
+                    if control["type"] == "switch":
+                        payload["state"] = s.state
+                    elif control["type"] == "slider":
+                        attribute = control.get("attribute", "state")
+                        if attribute == "state":
+                            payload["value"] = s.state
+                        else:
+                            payload["value"] = s.attributes.get(attribute)
+                    elif control["type"] == "color":
+                        payload["rgb_color"] = s.attributes.get(ATTR_RGB_COLOR)
+                    
+                    self.hass.async_create_task(
+                        mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
+                    )
