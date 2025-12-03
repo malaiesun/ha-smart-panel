@@ -58,15 +58,20 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             try:
                 devices = yaml.safe_load(user_input["devices_yaml"])
+                if devices is None:
+                    devices = []
                 if not isinstance(devices, list):
                     raise ValueError("YAML must be a list of devices")
                 
-                # Basic validation
+                # Basic validation and add IDs
                 for device in devices:
                     if not isinstance(device, dict) or "name" not in device or "controls" not in device:
                         raise ValueError("Invalid device structure in YAML")
                     if "id" not in device:
                         device["id"] = str(uuid.uuid4())
+                    for control in device.get("controls", []):
+                        if "id" not in control:
+                            control["id"] = str(uuid.uuid4())
                 
                 self.options[CONF_DEVICES] = devices
                 return self.async_create_entry(title="", data=self.options)
@@ -75,10 +80,26 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 _LOGGER.error("YAML parsing error: %s", e)
                 errors["base"] = "invalid_yaml"
 
+        current_devices = self.options.get(CONF_DEVICES, [])
+        devices_for_yaml = []
+        if current_devices:
+            for device in current_devices:
+                device_copy = device.copy()
+                device_copy.pop("id", None)
+                controls_copy = []
+                for control in device_copy.get("controls", []):
+                    control_copy = control.copy()
+                    control_copy.pop("id", None)
+                    controls_copy.append(control_copy)
+                device_copy["controls"] = controls_copy
+                devices_for_yaml.append(device_copy)
+
+        current_yaml = yaml.dump(devices_for_yaml) if devices_for_yaml else ""
+
         return self.async_show_form(
             step_id="yaml",
             data_schema=vol.Schema({
-                vol.Required("devices_yaml"): TextSelector(TextSelectorConfig(multiline=True))
+                vol.Required("devices_yaml", default=current_yaml): TextSelector(TextSelectorConfig(multiline=True))
             }),
             errors=errors,
             description_placeholders={"description": "Enter devices configuration in YAML format."}
@@ -123,7 +144,6 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 user_input[CONF_ID] = str(uuid.uuid4())
                 user_input[CONF_CONTROLS] = []
                 devices.append(user_input)
-                self.current_device_id = user_input[CONF_ID]
             
             self.options[CONF_DEVICES] = devices
             return await self.async_create_entry(title="", data=self.options)
@@ -139,9 +159,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_controls(self, user_input=None):
         """Manage controls for a device."""
-        device = next((d for d in self.options.get(CONF_DEVICES, []) if d[CONF_ID] == self.current_device_id), {})
+        device = next((d for d in self.options.get(CONF_DEVICES, []) if d[CONF_ID] == self.current_device_id), None)
         if not device:
-            # Device was deleted, go back to init
             return await self.async_step_init()
         controls = device.get(CONF_CONTROLS, [])
         
@@ -156,7 +175,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             self.current_control_id = user_input["action"]
             return await self.async_step_control_menu()
 
-        control_map = {c[CONF_ID]: c[CONF_LABEL] for c in controls}
+        control_map = {c.get('id'): c.get('label') for c in controls if c.get('id')}
         options = {"add": "Add a new control", **control_map, "back": "Back"}
 
         return self.async_show_form(
@@ -261,7 +280,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_abort(reason="unknown")
         
         # Format options for select
-        if self.control_data.get(CONF_TYPE) == "select" and self.control_data.get(CONF_OPTIONS):
+        if self.control_data.get(CONF_TYPE) == "select" and isinstance(self.control_data.get(CONF_OPTIONS), str):
             options_list = [opt.strip() for opt in self.control_data[CONF_OPTIONS].split(",")]
             self.control_data[CONF_OPTIONS] = "\n".join(options_list)
 

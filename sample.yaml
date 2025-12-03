@@ -1,0 +1,35 @@
+- name: Living Room Light
+  icon: mdi:lightbulb
+  controls:
+    - label: "On/Off"
+      type: "switch"
+      entity: "light.living_room"
+    - label: "Brightness"
+      type: "slider"
+      entity: "light.living_room"
+- name: Living Room Fan
+  icon: mdi:fan
+  controls:
+    - label: "On/Off"
+      type: "switch"
+      entity: "fan.living_room_fan"
+    - label: "Speed"
+      type: "slider"
+      entity: "fan.living_room_fan"
+      attribute: "percentage"
+- name: TV
+  icon: mdi:tv
+  controls:
+    - label: "Power"
+      type: "switch"
+      entity: "media_player.living_room_tv"
+    - label: "Volume"
+      type: "slider"
+      entity: "media_player.living_room_tv"
+      attribute: "volume_level"
+- name: Scenes
+  icon: mdi:palette
+  controls:
+    - label: "Scene"
+      type: "select"
+      entity: "input_select.scenes"
