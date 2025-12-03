@@ -3,10 +3,11 @@ Options flow for MESH Smart Home Panel."""
 import logging
 import uuid
 import voluptuous as vol
+import yaml
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
-    TextSelector,
+    TextSelector, TextSelectorConfig,
     SelectSelector, SelectSelectorConfig, SelectSelectorMode,
     EntitySelector,
     IconSelector,
@@ -33,6 +34,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             if "add" == user_input["action"]:
                 self.current_device_id = None
                 return await self.async_step_device()
+            if "yaml" == user_input["action"]:
+                return await self.async_step_yaml()
             
             self.current_device_id = user_input["action"]
             return await self.async_step_device_menu()
@@ -40,13 +43,45 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         devices = self.options.get(CONF_DEVICES, [])
         device_map = {d[CONF_ID]: d[CONF_NAME] for d in devices}
         
-        options = {"add": "Add a new device", **device_map}
+        options = {"add": "Add a new device", "yaml": "Configure with YAML", **device_map}
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
                 vol.Required("action", default="add"): vol.In(options)
             })
+        )
+
+    async def async_step_yaml(self, user_input=None):
+        """Handle YAML configuration of devices."""
+        errors = {}
+        if user_input is not None:
+            try:
+                devices = yaml.safe_load(user_input["devices_yaml"])
+                if not isinstance(devices, list):
+                    raise ValueError("YAML must be a list of devices")
+                
+                # Basic validation
+                for device in devices:
+                    if not isinstance(device, dict) or "name" not in device or "controls" not in device:
+                        raise ValueError("Invalid device structure in YAML")
+                    if "id" not in device:
+                        device["id"] = str(uuid.uuid4())
+                
+                self.options[CONF_DEVICES] = devices
+                return self.async_create_entry(title="", data=self.options)
+
+            except (yaml.YAMLError, ValueError) as e:
+                _LOGGER.error("YAML parsing error: %s", e)
+                errors["base"] = "invalid_yaml"
+
+        return self.async_show_form(
+            step_id="yaml",
+            data_schema=vol.Schema({
+                vol.Required("devices_yaml"): TextSelector(TextSelectorConfig(multiline=True))
+            }),
+            errors=errors,
+            description_placeholders={"description": "Enter devices configuration in YAML format."}
         )
 
     async def async_step_device_menu(self, user_input=None):
@@ -91,13 +126,13 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 self.current_device_id = user_input[CONF_ID]
             
             self.options[CONF_DEVICES] = devices
-            return await self.async_step_device_menu()
+            return await self.async_create_entry(title="", data=self.options)
 
         return self.async_show_form(
             step_id="device",
             data_schema=vol.Schema({
                 vol.Required(CONF_NAME, default=device_data.get(CONF_NAME, "")): TextSelector(),
-                vol.Required(CONF_ICON, default=device_data.get(CONF_ICON, "mdi:power")): IconSelector(),
+                vol.Required(CONF_ICON, default=device_data.get(CONF_ICON, "mdi:power") ): IconSelector(),
             }),
             errors=errors
         )
@@ -105,6 +140,9 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_controls(self, user_input=None):
         """Manage controls for a device."""
         device = next((d for d in self.options.get(CONF_DEVICES, []) if d[CONF_ID] == self.current_device_id), {})
+        if not device:
+            # Device was deleted, go back to init
+            return await self.async_step_init()
         controls = device.get(CONF_CONTROLS, [])
         
         if user_input is not None:
@@ -141,7 +179,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                         devices[i][CONF_CONTROLS] = controls
                         break
                 self.options[CONF_DEVICES] = devices
-                return await self.async_step_controls()
+                return self.async_create_entry(title="", data=self.options)
             if "back" == user_input["action"]:
                 return await self.async_step_controls()
 
@@ -172,9 +210,9 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="control",
             data_schema=vol.Schema({
-                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "")): TextSelector(),
+                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "") ): TextSelector(),
                 vol.Required(CONF_TYPE, default=self.control_data.get(CONF_TYPE, "switch") ): SelectSelector(SelectSelectorConfig(options=CONTROL_TYPES, mode=SelectSelectorMode.DROPDOWN)),
-                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "")): EntitySelector(),
+                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "") ): EntitySelector(),
             }),
             errors=errors
         )

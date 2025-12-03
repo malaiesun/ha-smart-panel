@@ -22,17 +22,21 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             panel_id = user_input[CONF_PANEL_ID].strip()
+            name = user_input[CONF_NAME].strip()
             await self.async_set_unique_id(panel_id)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
-                title=f"MESH Panel ({panel_id})",
-                data={CONF_PANEL_ID: panel_id},
+                title=name,
+                data={CONF_PANEL_ID: panel_id, CONF_NAME: name},
                 options={CONF_DEVICES: []} 
             )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_PANEL_ID): str}),
+            data_schema=vol.Schema({
+                vol.Required(CONF_PANEL_ID): str,
+                vol.Required(CONF_NAME, default="MESH Panel"): str,
+            }),
             errors=errors,
         )
 
@@ -45,8 +49,9 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(panel_id)
         self._abort_if_unique_id_configured()
 
+        name = f"MESH Panel ({panel_id})"
         return self.async_create_entry(
-            title=f"MESH Panel ({panel_id})",
-            data={CONF_PANEL_ID: panel_id},
+            title=name,
+            data={CONF_PANEL_ID: panel_id, CONF_NAME: name},
             options={CONF_DEVICES: []}
         )

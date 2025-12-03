@@ -1,7 +1,7 @@
 {
   "domain": "mesh_panel",
   "name": "MESH Smart Home Panel",
-  "version": "1.0.1",
+  "version": "1.0.15",
   "codeowners": ["@malaiesun"],
   "config_flow": true,
   "documentation": "https://github.com/malaiesun/ha-mesh-panel",
