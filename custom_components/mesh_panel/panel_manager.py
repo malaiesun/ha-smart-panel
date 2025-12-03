@@ -1,6 +1,7 @@
 """Manages a MESH panel."""
 import json
 import logging
+import copy
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import mqtt
 from homeassistant.const import (
@@ -57,7 +58,32 @@ class MeshPanelController:
 
     async def publish_ui(self):
         """Publish the UI configuration to the panel."""
-        payload = {"devices": self.devices_config}
+        config_to_publish = copy.deepcopy(self.devices_config)
+
+        for dev in config_to_publish:
+            for control in dev.get("controls", []):
+                if control.get("type") == "select":
+                    entity_id = control.get("entity")
+                    if not entity_id: continue
+                    
+                    state = self.hass.states.get(entity_id)
+                    if not state or not state.attributes: continue
+
+                    options_attr = None
+                    domain = entity_id.split(".")[0]
+                    if domain == "input_select":
+                        options_attr = "options"
+                    elif domain == "fan":
+                        options_attr = "preset_modes" if "preset_modes" in state.attributes else "speed_list"
+                    elif domain == "media_player":
+                        options_attr = "source_list"
+                    
+                    if options_attr and options_attr in state.attributes:
+                        options_list = state.attributes[options_attr]
+                        if options_list:
+                            control["options"] = "\n".join(options_list)
+
+        payload = {"devices": config_to_publish}
         await mqtt.async_publish(self.hass, self.topic_ui, json.dumps(payload), retain=True)
 
     def _collect_watched_entities(self):
@@ -158,36 +184,49 @@ class MeshPanelController:
         payload = {"entity": entity_id}
         found = False
 
-        # Is this entity a control?
         control = self._find_control(entity_id)
         if control:
             found = True
             ctype = control.get("type")
+            domain = entity_id.split(".")[0]
+
             if ctype == "switch":
                 payload["state"] = state.state
             elif ctype == "slider":
                 attribute = control.get("attribute")
-                val = state.state
+                val = None
                 if attribute: 
                     val = state.attributes.get(attribute)
-                try:
-                    payload["value"] = int(float(val))
-                except (ValueError, TypeError):
-                    _LOGGER.debug(f"Could not convert '{val}' to number for {entity_id}")
+                elif domain == "light":
+                    val = state.attributes.get(ATTR_BRIGHTNESS)
+                else:
+                    val = state.state
+                
+                if val is not None:
+                    try:
+                        payload["value"] = int(float(val))
+                    except (ValueError, TypeError):
+                        _LOGGER.debug(f"Could not convert slider value '{val}' to number for {entity_id}")
+                elif domain == 'light': # If brightness is None, light is off
+                    payload['value'] = 0
+
             elif ctype == "color":
-                payload["rgb_color"] = state.attributes.get(ATTR_RGB_COLOR)
+                rgb = state.attributes.get(ATTR_RGB_COLOR)
+                if rgb:
+                    payload['rgb_color'] = rgb
+                else:
+                    payload['rgb_color'] = [0, 0, 0] # Default to black/off
             elif ctype == "select":
                 payload["option"] = state.state
         
-        # Or is it a primary state_entity for a device?
-        else:
+        else: # Is it a primary state_entity for a device?
             for dev in self.devices_config:
                 if dev.get("state_entity") == entity_id:
                     payload["state"] = state.state
                     found = True
                     break
         
-        if found and len(payload) > 1:
+        if found:
             self.hass.async_create_task(
                 mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
             )
