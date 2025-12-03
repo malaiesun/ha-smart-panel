@@ -8,5 +8,10 @@
   "issue_tracker": "https://github.com/malaiesun/ha-mesh-panel/issues",
   "iot_class": "local_push",
   "dependencies": ["mqtt"],
-  "requirements": []
+  "requirements": [],
+  "brand": {
+    "name": "MESH Smart Home Panel",
+    "logo": "https://raw.githubusercontent.com/malaiesun/ha-mesh-panel/main/logo.png",
+    "icon": "https://raw.githubusercontent.com/malaiesun/ha-mesh-panel/main/icon.png"
+  }
 }
