@@ -3,7 +3,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from .const import DOMAIN, CONF_PANEL_ID, CONF_DEVICES
+from .const import *
 from .options_flow import MeshPanelOptionsFlowHandler
 
 @config_entries.HANDLERS.register(DOMAIN)
@@ -22,17 +22,20 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             panel_id = user_input[CONF_PANEL_ID].strip()
+            name = user_input.get(CONF_NAME, f"MESH Panel ({panel_id})")
             await self.async_set_unique_id(panel_id)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
-                title=f"MESH Panel ({panel_id})",
-                data={CONF_PANEL_ID: panel_id},
-                options={CONF_DEVICES: []} 
+                title=name,
+                data={CONF_PANEL_ID: panel_id, CONF_NAME: name}
             )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_PANEL_ID): str}),
+            data_schema=vol.Schema({
+                vol.Required(CONF_PANEL_ID): str,
+                vol.Optional(CONF_NAME, default="MESH Panel"): str,
+            }),
             errors=errors,
         )
 
@@ -47,6 +50,5 @@ class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_create_entry(
             title=f"MESH Panel ({panel_id})",
-            data={CONF_PANEL_ID: panel_id},
-            options={CONF_DEVICES: []}
+            data={CONF_PANEL_ID: panel_id, CONF_NAME: f"MESH Panel ({panel_id})"}
         )
