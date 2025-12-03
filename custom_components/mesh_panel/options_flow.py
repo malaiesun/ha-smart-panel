@@ -11,7 +11,7 @@ from homeassistant.helpers.selector import (
     SelectSelector, SelectSelectorConfig, SelectSelectorMode,
     EntitySelector,
     IconSelector,
-    NumberSelector, NumberSelectorConfig,
+    NumberSelector, NumberSelectorConfig, NumberSelectorMode,
 )
 from .const import *
 
@@ -22,12 +22,14 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry):
         """Initialize options flow."""
+        super().__init__(config_entry, DOMAIN)
         self.config_entry = config_entry
         self.options = dict(config_entry.options)
         self.current_device_id = None
         self.current_control_id = None
         self.control_data = {}
 
+    @callback
     async def async_step_init(self, user_input=None):
         """Manage the devices."""
         if user_input is not None:
@@ -46,17 +48,17 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         devices = self.options.get(CONF_DEVICES, [])
         device_map = {d[CONF_ID]: d[CONF_NAME] for d in devices}
         
-        options = {
-            "add": "Add a new device", 
-            **device_map,
-            "backup": "Backup Configuration",
-            "restore": "Restore Configuration"
-        }
+        options = [
+            {"label": "Add a new device", "value": "add"},
+            *([{"label": v, "value": k} for k, v in device_map.items()]),
+            {"label": "Backup Configuration", "value": "backup"},
+            {"label": "Restore Configuration", "value": "restore"}
+        ]
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
-                vol.Required("action", default="add"): vol.In(options)
+                vol.Required("action", default="add"): SelectSelector(SelectSelectorConfig(options=options))
             })
         )
 
@@ -71,7 +73,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="backup",
             data_schema=vol.Schema({
-                vol.Optional("config", default=backup_data): TextSelector(TextSelectorConfig(multiline=True, type="text"))
+                vol.Optional("config", default=backup_data): TextSelector(TextSelectorConfig(multiline=True, type="hidden"))
             }),
             description="Copy the configuration below and save it to a text file. Press submit when you are done."
         )
@@ -85,7 +87,12 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 if not isinstance(devices, list):
                     raise ValueError("Configuration must be a list of devices.")
                 
-                # TODO: Add more validation here
+                for device in devices:
+                    if any(k not in device for k in (CONF_ID, CONF_NAME, CONF_ICON, CONF_CONTROLS)):
+                        raise ValueError("Invalid device structure.")
+                    for control in device.get(CONF_CONTROLS, []):
+                        if any(k not in control for k in (CONF_ID, CONF_LABEL, CONF_TYPE, CONF_ENTITY)):
+                            raise ValueError("Invalid control structure.")
 
                 self.options[CONF_DEVICES] = devices
                 return self.async_create_entry(title="", data=self.options)
@@ -119,10 +126,17 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             if action == "back":
                 return await self.async_step_init()
 
+        options = [
+            {"label": "Edit Device", "value": "edit"},
+            {"label": "Delete Device", "value": "delete"},
+            {"label": "Manage Controls", "value": "controls"},
+            {"label": "Back", "value": "back"}
+        ]
+
         return self.async_show_form(
             step_id="device_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({"edit": "Edit Device", "delete": "Delete Device", "controls": "Manage Controls", "back": "Back"})
+                vol.Required("action"): SelectSelector(SelectSelectorConfig(options=options))
             })
         )
 
@@ -141,7 +155,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                         devices[i] = {**d, **user_input}
                         break
             else: # Add
-                user_input[CONF_ID] = str(uuid.uuid4())
+                if CONF_ID not in user_input:
+                    user_input[CONF_ID] = str(uuid.uuid4())
                 user_input[CONF_CONTROLS] = []
                 devices.append(user_input)
                 self.current_device_id = user_input[CONF_ID]
@@ -176,12 +191,16 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_control_menu()
 
         control_map = {c[CONF_ID]: c[CONF_LABEL] for c in controls}
-        options = {"add": "Add a new control", **control_map, "back": "Back"}
+        options = [
+            {"label": "Add a new control", "value": "add"},
+            *([{"label": v, "value": k} for k, v in control_map.items()]),
+            {"label": "Back", "value": "back"}
+        ]
 
         return self.async_show_form(
             step_id="controls",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In(options)
+                vol.Required("action"): SelectSelector(SelectSelectorConfig(options=options))
             })
         )
 
@@ -203,10 +222,16 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             if action == "back":
                 return await self.async_step_controls()
 
+        options = [
+            {"label": "Edit Control", "value": "edit"},
+            {"label": "Delete Control", "value": "delete"},
+            {"label": "Back", "value": "back"}
+        ]
+
         return self.async_show_form(
             step_id="control_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({"edit": "Edit Control", "delete": "Delete Control", "back": "Back"})
+                vol.Required("action"): SelectSelector(SelectSelectorConfig(options=options))
             })
         )
 
@@ -244,7 +269,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             return await self._save_control()
         
         attributes = ["state"]
-        if self.control_data.get(CONF_ENTITY):
+        if CONF_ENTITY in self.control_data:
             entity = self.hass.states.get(self.control_data[CONF_ENTITY])
             if entity:
                 attributes.extend(entity.attributes.keys())
@@ -252,10 +277,10 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="control_slider",
             data_schema=vol.Schema({
-                vol.Optional(CONF_MIN, default=self.control_data.get(CONF_MIN, 0)): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="slider")),
-                vol.Optional(CONF_MAX, default=self.control_data.get(CONF_MAX, 100)): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="slider")),
-                vol.Optional(CONF_STEP, default=self.control_data.get(CONF_STEP, 1)): NumberSelector(NumberSelectorConfig(min=1, max=100, step=1, mode="slider")),
-                vol.Optional("attribute", default=self.control_data.get("attribute", "state") ): vol.In(attributes),
+                vol.Optional(CONF_MIN): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="box", default=self.control_data.get(CONF_MIN, 0))),
+                vol.Optional(CONF_MAX): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="box", default=self.control_data.get(CONF_MAX, 100))),
+                vol.Optional(CONF_STEP): NumberSelector(NumberSelectorConfig(min=1, max=100, step=1, mode="box", default=self.control_data.get(CONF_STEP, 1))),
+                vol.Optional(CONF_ATTRIBUTE, default=self.control_data.get(CONF_ATTRIBUTE, "state")): vol.In(attributes),
             })
         )
 
@@ -268,9 +293,16 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="control_select",
             data_schema=vol.Schema({
-                vol.Optional(CONF_OPTIONS, default=self.control_data.get(CONF_OPTIONS, "") ): TextSelector(),
+                vol.Optional(CONF_OPTIONS, default=self.control_data.get(CONF_OPTIONS, [])): [
+                    vol.Object(
+                        {
+                            vol.Required("key"): TextSelector(),
+                            vol.Required("value"): TextSelector(),
+                        }
+                    )
+                ]
             }),
-            description_placeholders={"description": "Enter a comma-separated list of options."}
+            description_placeholders={"description": "Add, edit, and reorder the options for the select control."}
         )
 
     async def _save_control(self):
@@ -281,141 +313,13 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_abort(reason="unknown")
         
         # Format options for select
-        if self.control_data.get(CONF_TYPE) == "select" and self.control_data.get(CONF_OPTIONS):
-            options_list = [opt.strip() for opt in self.control_data[CONF_OPTIONS].split(",")]
-            self.control_data[CONF_OPTIONS] = "\n".join(options_list)
-
-        controls = device.get(CONF_CONTROLS, [])
-        if self.current_control_id: # Edit
-            for i, c in enumerate(controls):
-                if c[CONF_ID] == self.current_control_id:
-                    controls[i] = self.control_data
-                    break
-        else: # Add
-            self.control_data[CONF_ID] = str(uuid.uuid4())
-            controls.append(self.control_data)
-        
-        device[CONF_CONTROLS] = controls
-        self.options[CONF_DEVICES] = devices
-        return self.async_create_entry(title="", data=self.options)
-control_id = None
-                self.control_data = {}
-                return await self.async_step_control()
-            if action == "back":
-                return await self.async_step_device_menu()
-            
-            self.current_control_id = action
-            return await self.async_step_control_menu()
-
-        control_map = {c[CONF_ID]: c[CONF_LABEL] for c in controls}
-        options = {"add": "Add a new control", **control_map, "back": "Back"}
-
-        return self.async_show_form(
-            step_id="controls",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In(options)
-            })
-        )
-
-    async def async_step_control_menu(self, user_input=None):
-        """Handle the control menu."""
-        if user_input is not None:
-            action = user_input["action"]
-            if action == "edit":
-                return await self.async_step_control()
-            if action == "delete":
-                devices = self.options.get(CONF_DEVICES, [])
-                for i, d in enumerate(devices):
-                    if d[CONF_ID] == self.current_device_id:
-                        controls = [c for c in d.get(CONF_CONTROLS, []) if c[CONF_ID] != self.current_control_id]
-                        devices[i][CONF_CONTROLS] = controls
-                        break
-                self.options[CONF_DEVICES] = devices
-                return self.async_create_entry(title="", data=self.options)
-            if action == "back":
-                return await self.async_step_controls()
-
-        return self.async_show_form(
-            step_id="control_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({"edit": "Edit Control", "delete": "Delete Control", "back": "Back"})
-            })
-        )
-
-    async def async_step_control(self, user_input=None):
-        """Handle control add/edit."""
-        errors = {}
-        if self.current_control_id:
-            device = next((d for d in self.options.get(CONF_DEVICES, []) if d[CONF_ID] == self.current_device_id), {})
-            controls = device.get(CONF_CONTROLS, [])
-            self.control_data = next((c for c in controls if c[CONF_ID] == self.current_control_id), {})
-
-        if user_input is not None:
-            self.control_data.update(user_input)
-            if self.control_data[CONF_TYPE] == "slider":
-                return await self.async_step_control_slider()
-            if self.control_data[CONF_TYPE] == "select":
-                return await self.async_step_control_select()
-            
-            return await self._save_control()
-
-        return self.async_show_form(
-            step_id="control",
-            data_schema=vol.Schema({
-                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "") ): TextSelector(),
-                vol.Required(CONF_TYPE, default=self.control_data.get(CONF_TYPE, "switch") ): SelectSelector(SelectSelectorConfig(options=CONTROL_TYPES, mode=SelectSelectorMode.DROPDOWN)),
-                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "") ): EntitySelector(),
-            }),
-            errors=errors
-        )
-
-    async def async_step_control_slider(self, user_input=None):
-        """Handle slider control options."""
-        if user_input is not None:
-            self.control_data.update(user_input)
-            return await self._save_control()
-        
-        attributes = ["state"]
-        if self.control_data.get(CONF_ENTITY):
-            entity = self.hass.states.get(self.control_data[CONF_ENTITY])
-            if entity:
-                attributes.extend(entity.attributes.keys())
-
-        return self.async_show_form(
-            step_id="control_slider",
-            data_schema=vol.Schema({
-                vol.Optional(CONF_MIN, default=self.control_data.get(CONF_MIN, 0)): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="slider")),
-                vol.Optional(CONF_MAX, default=self.control_data.get(CONF_MAX, 100)): NumberSelector(NumberSelectorConfig(min=0, max=1000, step=1, mode="slider")),
-                vol.Optional(CONF_STEP, default=self.control_data.get(CONF_STEP, 1)): NumberSelector(NumberSelectorConfig(min=1, max=100, step=1, mode="slider")),
-                vol.Optional("attribute", default=self.control_data.get("attribute", "state") ): vol.In(attributes),
-            })
-        )
-
-    async def async_step_control_select(self, user_input=None):
-        """Handle select control options."""
-        if user_input is not None:
-            self.control_data.update(user_input)
-            return await self._save_control()
-
-        return self.async_show_form(
-            step_id="control_select",
-            data_schema=vol.Schema({
-                vol.Optional(CONF_OPTIONS, default=self.control_data.get(CONF_OPTIONS, "") ): TextSelector(),
-            }),
-            description_placeholders={"description": "Enter a comma-separated list of options."}
-        )
-
-    async def _save_control(self):
-        """Save the control data."""
-        devices = self.options.get(CONF_DEVICES, [])
-        device = next((d for d in devices if d[CONF_ID] == self.current_device_id), None)
-        if not device:
-            return self.async_abort(reason="unknown")
-        
-        # Format options for select
-        if self.control_data.get(CONF_TYPE) == "select" and self.control_data.get(CONF_OPTIONS):
-            options_list = [opt.strip() for opt in self.control_data[CONF_OPTIONS].split(",")]
-            self.control_data[CONF_OPTIONS] = "\n".join(options_list)
+        if self.control_data.get(CONF_TYPE) == "select":
+            options = self.control_data.get(CONF_OPTIONS)
+            if options:
+                options_list = [f"{opt['value']}:{opt['key']}" for opt in options]
+                self.control_data[CONF_OPTIONS] = "\n".join(options_list)
+            else:
+                self.control_data[CONF_OPTIONS] = ""
 
         controls = device.get(CONF_CONTROLS, [])
         if self.current_control_id: # Edit
