@@ -1,47 +1,40 @@
-"Manages a MESH panel."
-import asyncio
+"""Manages a MESH panel."""
 import json
 import logging
 import copy
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import mqtt
 from homeassistant.const import (
-    SERVICE_TURN_ON,
-    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON, 
+    SERVICE_TURN_OFF, 
     ATTR_ENTITY_ID
 )
 from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_RGB_COLOR
-from homeassistant.helpers.event import async_track_state_change_event, async_call_later
+from homeassistant.helpers.event import async_track_state_change_event
 from .const import *
-from .storage import DevicesStore
 
 _LOGGER = logging.getLogger(__name__)
-
-DEBOUNCE_DELAY = 0.2
 
 class MeshPanelController:
     """Controller for a MESH panel."""
 
-    def __init__(self, hass: HomeAssistant, panel_id: str, devices_data: list, store: DevicesStore):
+    def __init__(self, hass: HomeAssistant, panel_id: str, devices_data: list):
         """Initialize the controller."""
         self.hass = hass
         self.panel_id = panel_id
-        self.store = store
         self.topic_ui = TOPIC_UI_FMT.format(panel_id=panel_id)
         self.topic_state = TOPIC_STATE_FMT.format(panel_id=panel_id)
         self.topic_action = TOPIC_ACTION_FMT.format(panel_id=panel_id)
         self.topic_notify = TOPIC_NOTIFY_FMT.format(panel_id=panel_id)
-
+        
         self.devices_config = devices_data
-
+        
         self._unsub_action = None
         self._state_unsub = None
         self._watched = set()
-        self._debounce_timers = {}
 
     async def start(self):
         """Start the controller."""
-        _LOGGER.debug(f"[{self.panel_id}] Starting controller")
         async def _on_action(msg):
             await self._handle_action(msg.payload)
 
@@ -54,22 +47,17 @@ class MeshPanelController:
             )
 
         await self.publish_ui()
-        await self.full_state_update()
         await self._register_services()
 
     async def stop(self):
         """Stop the controller."""
-        _LOGGER.debug(f"[{self.panel_id}] Stopping controller")
         if self._unsub_action:
             self._unsub_action()
         if self._state_unsub:
             self._state_unsub()
-        for timer in self._debounce_timers.values():
-            timer()
 
     async def publish_ui(self):
         """Publish the UI configuration to the panel."""
-        _LOGGER.debug(f"[{self.panel_id}] Publishing UI")
         config_to_publish = copy.deepcopy(self.devices_config)
 
         for dev in config_to_publish:
@@ -77,7 +65,7 @@ class MeshPanelController:
                 if control.get("type") == "select":
                     entity_id = control.get("entity")
                     if not entity_id: continue
-
+                    
                     state = self.hass.states.get(entity_id)
                     if not state or not state.attributes: continue
 
@@ -89,7 +77,7 @@ class MeshPanelController:
                         options_attr = "preset_modes" if "preset_modes" in state.attributes else "speed_list"
                     elif domain == "media_player":
                         options_attr = "source_list"
-
+                    
                     if options_attr and options_attr in state.attributes:
                         options_list = state.attributes[options_attr]
                         if options_list:
@@ -97,13 +85,6 @@ class MeshPanelController:
 
         payload = {"devices": config_to_publish}
         await mqtt.async_publish(self.hass, self.topic_ui, json.dumps(payload), retain=True)
-
-    async def full_state_update(self):
-        _LOGGER.debug(f"[{self.panel_id}] Full state update for {len(self._watched)} entities")
-        for entity_id in self._watched:
-            await self._publish_entity_state(entity_id)
-            await asyncio.sleep(0.05)
-
 
     def _collect_watched_entities(self):
         """Collect all entities to watch for state changes."""
@@ -139,15 +120,10 @@ class MeshPanelController:
 
     async def _handle_action(self, payload: str):
         """Handle an action from the panel."""
-        _LOGGER.debug(f"[{self.panel_id}] Received action: {payload}")
         try:
             data = json.loads(payload or "{}")
             entity_id = data.get("id")
             if not entity_id: return
-
-            if self._debounce_timers.get(entity_id):
-                self._debounce_timers[entity_id]()
-                del self._debounce_timers[entity_id]
 
             if data.get("get_state"):
                 await self._publish_entity_state(entity_id)
@@ -194,9 +170,7 @@ class MeshPanelController:
                     service_data["source"] = data["option"]
 
             if service:
-                await self.hass.services.async_call(domain, service, service_data, blocking=True)
-                await self._publish_entity_state(entity_id)
-
+                await self.hass.services.async_call(domain, service, service_data)
 
         except Exception as e:
             _LOGGER.error("Action error: %s", e)
@@ -221,48 +195,38 @@ class MeshPanelController:
             elif ctype == "slider":
                 attribute = control.get("attribute")
                 val = None
-                if attribute:
+                if attribute: 
                     val = state.attributes.get(attribute)
                 elif domain == "light":
                     val = state.attributes.get(ATTR_BRIGHTNESS)
-                elif domain == "fan":
-                    val = state.attributes.get("percentage")
-                elif domain == "media_player":
-                    vol = state.attributes.get("volume_level")
-                    if vol is not None:
-                        val = int(vol * 100.0)
-                elif domain == "climate":
-                    val = state.attributes.get("temperature")
                 else:
                     val = state.state
-
+                
                 if val is not None:
                     try:
                         payload["value"] = int(float(val))
                     except (ValueError, TypeError):
                         _LOGGER.debug(f"Could not convert slider value '{val}' to number for {entity_id}")
-                elif domain == 'light' and state.state == 'off':
+                elif domain == 'light': # If brightness is None, light is off
                     payload['value'] = 0
-
 
             elif ctype == "color":
                 rgb = state.attributes.get(ATTR_RGB_COLOR)
                 if rgb:
                     payload['rgb_color'] = rgb
-                elif state.state == 'off':
-                    payload['rgb_color'] = [0, 0, 0]
+                else:
+                    payload['rgb_color'] = [0, 0, 0] # Default to black/off
             elif ctype == "select":
                 payload["option"] = state.state
-
+        
         else: # Is it a primary state_entity for a device?
             for dev in self.devices_config:
                 if dev.get("state_entity") == entity_id:
                     payload["state"] = state.state
                     found = True
                     break
-
-        if found and len(payload) > 1:
-            _LOGGER.debug(f"[{self.panel_id}] Publishing state: {json.dumps(payload)}")
+        
+        if found:
             self.hass.async_create_task(
                 mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
             )
@@ -270,17 +234,8 @@ class MeshPanelController:
     @callback
     def _handle_state_event(self, event):
         """Handle a state change event."""
-        _LOGGER.debug(f"[{self.panel_id}] State change event for {event.data.get('entity_id')}")
         if not event.data.get("new_state"):
             return
-
+            
         entity_id = event.data["entity_id"]
-        
-        if self._debounce_timers.get(entity_id):
-            self._debounce_timers[entity_id]()
-        
-        self._debounce_timers[entity_id] = async_call_later(
-            self.hass,
-            DEBOUNCE_DELAY,
-            lambda _: self.hass.async_create_task(self._publish_entity_state(entity_id))
-        )
+        self.hass.async_create_task(self._publish_entity_state(entity_id))

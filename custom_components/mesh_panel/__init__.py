@@ -3,9 +3,8 @@ import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.components import mqtt
-from .const import DOMAIN, CONF_PANEL_ID, TOPIC_ANNOUNCE
+from .const import DOMAIN, CONF_PANEL_ID, CONF_DEVICES, TOPIC_ANNOUNCE
 from .panel_manager import MeshPanelController
-from .storage import DevicesStore
 import json
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,29 +28,22 @@ async def async_setup(hass: HomeAssistant, config):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up MESH panel from a config entry."""
-    _LOGGER.debug(f"Setting up entry: {entry.data}")
     panel_id = entry.data[CONF_PANEL_ID]
-    
-    store = DevicesStore(hass, panel_id)
-    devices_data = await store.async_load_devices()
-    _LOGGER.debug(f"Loaded {len(devices_data)} devices from store")
+    devices_data = entry.options.get(CONF_DEVICES, []) 
 
-    ctrl = MeshPanelController(hass, panel_id, devices_data, store)
+    ctrl = MeshPanelController(hass, panel_id, devices_data)
     await ctrl.start()
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
-        "controller": ctrl,
-        "store": store
-    }
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = ctrl
     
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload a config entry."""
-    data = hass.data[DOMAIN].pop(entry.entry_id, None)
-    if data:
-        await data["controller"].stop()
+    ctrl = hass.data[DOMAIN].pop(entry.entry_id, None)
+    if ctrl:
+        await ctrl.stop()
     return True
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
