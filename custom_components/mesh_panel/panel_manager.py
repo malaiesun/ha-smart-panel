@@ -64,6 +64,8 @@ class MeshPanelController:
         """Collect all entities to watch for state changes."""
         self._watched.clear()
         for dev in self.devices_config:
+            if dev.get("state_entity"):
+                self._watched.add(dev["state_entity"])
             for control in dev.get("controls", []):
                 if control.get("entity"):
                     self._watched.add(control["entity"])
@@ -96,6 +98,10 @@ class MeshPanelController:
             data = json.loads(payload or "{}")
             entity_id = data.get("id")
             if not entity_id: return
+
+            if data.get("get_state"):
+                await self._publish_entity_state(entity_id)
+                return
 
             control = self._find_control(entity_id)
             if not control: return
@@ -143,29 +149,54 @@ class MeshPanelController:
         except Exception as e:
             _LOGGER.error("Action error: %s", e)
 
+    async def _publish_entity_state(self, entity_id: str):
+        """Get the current state of an entity and publish it to the panel."""
+        state = self.hass.states.get(entity_id)
+        if not state:
+            return
+
+        payload = {"entity": entity_id}
+        found = False
+
+        # Is this entity a control?
+        control = self._find_control(entity_id)
+        if control:
+            found = True
+            ctype = control.get("type")
+            if ctype == "switch":
+                payload["state"] = state.state
+            elif ctype == "slider":
+                attribute = control.get("attribute")
+                val = state.state
+                if attribute: 
+                    val = state.attributes.get(attribute)
+                try:
+                    payload["value"] = int(float(val))
+                except (ValueError, TypeError):
+                    _LOGGER.debug(f"Could not convert '{val}' to number for {entity_id}")
+            elif ctype == "color":
+                payload["rgb_color"] = state.attributes.get(ATTR_RGB_COLOR)
+            elif ctype == "select":
+                payload["option"] = state.state
+        
+        # Or is it a primary state_entity for a device?
+        else:
+            for dev in self.devices_config:
+                if dev.get("state_entity") == entity_id:
+                    payload["state"] = state.state
+                    found = True
+                    break
+        
+        if found and len(payload) > 1:
+            self.hass.async_create_task(
+                mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
+            )
+
     @callback
     def _handle_state_event(self, event):
         """Handle a state change event."""
-        s = event.data.get("new_state")
-        if not s: return
-
+        if not event.data.get("new_state"):
+            return
+            
         entity_id = event.data["entity_id"]
-        
-        for dev in self.devices_config:
-            for control in dev.get("controls", []):
-                if control.get("entity") == entity_id:
-                    payload = {"entity": entity_id}
-                    if control["type"] == "switch":
-                        payload["state"] = s.state
-                    elif control["type"] == "slider":
-                        attribute = control.get("attribute", "state")
-                        if attribute == "state":
-                            payload["value"] = s.state
-                        else:
-                            payload["value"] = s.attributes.get(attribute)
-                    elif control["type"] == "color":
-                        payload["rgb_color"] = s.attributes.get(ATTR_RGB_COLOR)
-                    
-                    self.hass.async_create_task(
-                        mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
-                    )
+        self.hass.async_create_task(self._publish_entity_state(entity_id))
