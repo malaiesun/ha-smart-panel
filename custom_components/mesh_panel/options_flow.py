@@ -153,7 +153,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="device",
             data_schema=vol.Schema({
                 vol.Required(CONF_NAME, default=device_data.get(CONF_NAME, "")): TextSelector(),
-                vol.Required(CONF_ICON, default=device_data.get(CONF_ICON, "mdi:power")): IconSelector(),
+                vol.Required(CONF_ICON, default=device_data.get(CONF_ICON, "mdi:power") ): IconSelector(),
             }),
             errors=errors
         )
@@ -230,9 +230,9 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="control",
             data_schema=vol.Schema({
-                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "")): TextSelector(),
+                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "") ): TextSelector(),
                 vol.Required(CONF_TYPE, default=self.control_data.get(CONF_TYPE, "switch") ): SelectSelector(SelectSelectorConfig(options=CONTROL_TYPES, mode=SelectSelectorMode.DROPDOWN)),
-                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "")): EntitySelector(),
+                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "") ): EntitySelector(),
             }),
             errors=errors
         )
@@ -362,9 +362,9 @@ control_id = None
         return self.async_show_form(
             step_id="control",
             data_schema=vol.Schema({
-                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "")): TextSelector(),
+                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "") ): TextSelector(),
                 vol.Required(CONF_TYPE, default=self.control_data.get(CONF_TYPE, "switch") ): SelectSelector(SelectSelectorConfig(options=CONTROL_TYPES, mode=SelectSelectorMode.DROPDOWN)),
-                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "")): EntitySelector(),
+                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "") ): EntitySelector(),
             }),
             errors=errors
         )
