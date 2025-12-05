@@ -491,36 +491,34 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
 
     # ---------------- Select config (auto options) ----------------
 
-    async def async_step_control_select(self, user_input=None):
-        """
-        Autodetect options from the selected entity.
-        Users don't need to type comma-separated values.
-        """
-        ent = self.control_data.get(CONF_ENTITY, "")
-        detected = _autodetect_select_options(self.hass, ent)
+async def async_step_control_select(self, user_input=None):
+    ent = self.control_data.get(CONF_ENTITY, "")
+    detected = _autodetect_select_options(self.hass, ent)
 
-        if user_input:
-            # No extra fields to accept; we just save the computed options
-            # Persist the options as newline-joined string (panel expects '\n')
-            self.control_data[CONF_OPTIONS] = "\n".join(detected) if detected else ""
-            await self._save_control(stay_in_flow=True)
-            return await self.async_step_controls()
+    if user_input:
+        # ensure entity stays valid
+        self.control_data[CONF_ENTITY] = ent  
 
-        # Show a simple info page with what we detected
-        desc = "This dropdown will use auto-detected options."
-        if detected:
-            desc += "\nDetected options:\n- " + "\n- ".join(detected)
-        else:
-            desc += "\n(No options detected from this entity.)"
+        # persist options
+        self.control_data[CONF_OPTIONS] = "\n".join(detected) if detected else ""
 
-        # Display a minimal form with a single button to confirm
-        return self.async_show_form(
-            step_id="control_select",
-            data_schema=vol.Schema({
-                vol.Required("confirm", default=True): vol.In({True: "Use detected options"}),
-            }),
-            description=desc
-        )
+        await self._save_control(stay_in_flow=True)
+        return await self.async_step_controls()
+
+    desc = "Auto-detected dropdown options."
+    if detected:
+        desc += "\n\nDetected:\n- " + "\n- ".join(detected)
+    else:
+        desc += "\n\nNo options detected for this entity."
+
+    return self.async_show_form(
+        step_id="control_select",
+        description=desc,
+        data_schema=vol.Schema({
+            vol.Required("confirm", default=True): bool
+        })
+    )
+
 
     # ---------------- Save helpers ----------------
 

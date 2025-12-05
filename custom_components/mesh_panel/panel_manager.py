@@ -328,7 +328,29 @@ class MeshPanelController:
                 payload["value"] = 0
 
         elif ctype == "color":
-            payload["rgb_color"] = state.attributes.get(ATTR_RGB_COLOR, [0, 0, 0])
+            rgb = state.attributes.get("rgb_color")
+
+            # rgbww / rgbw fallback
+            if not rgb:
+                if "rgbww_color" in state.attributes:
+                    rgb = state.attributes["rgbww_color"][:3]
+                elif "rgbw_color" in state.attributes:
+                    rgb = state.attributes["rgbw_color"][:3]
+
+            # hs fallback
+            if not rgb and "hs_color" in state.attributes:
+                h, s = state.attributes["hs_color"]
+                from homeassistant.util import color as color_util
+                rgb = color_util.color_hs_to_RGB(h, s)
+
+            # xy fallback
+            if not rgb and "xy_color" in state.attributes:
+                x, y = state.attributes["xy_color"]
+                from homeassistant.util import color as color_util
+                rgb = color_util.color_xy_to_RGB(x, y, 255)
+
+            payload["rgb_color"] = rgb or [0, 0, 0]
+
 
         elif ctype == "select":
             payload["option"] = state.state
