@@ -307,40 +307,44 @@ class MeshPanelController:
                 payload["value"] = 0
 
         elif ctype == "color":
-            rgb = None
-            attrs = state.attributes
-            
-            # 1. Try Direct RGB
-            if ATTR_RGB_COLOR in attrs:
-                rgb = self._to_rgb_list(attrs[ATTR_RGB_COLOR])
-            
-            # 2. Try RGBWW / RGBW
-            if not rgb and "rgbww_color" in attrs:
-                rgb = self._to_rgb_list(attrs["rgbww_color"])
-            if not rgb and "rgbw_color" in attrs:
-                rgb = self._to_rgb_list(attrs["rgbw_color"])
+            # Default to [0, 0, 0] (Black/Off)
+            final_rgb = [0, 0, 0]
 
-            # 3. Try XY (Common for Hue/Zigbee)
-            if not rgb and "xy_color" in attrs:
-                try:
-                    x, y = attrs["xy_color"]
-                    # Convert XY to RGB, assuming max brightness (255) for color calculation
-                    rgb_tuple = color_util.color_xy_to_RGB(x, y, 255)
-                    rgb = self._to_rgb_list(rgb_tuple)
-                except Exception:
-                    pass
+            # Only calculate color if the light is actually ON
+            if state.state == "on":
+                attrs = state.attributes
+                
+                # 1. Try Direct RGB (Best)
+                if ATTR_RGB_COLOR in attrs:
+                    final_rgb = self._to_rgb_list(attrs[ATTR_RGB_COLOR])
+                
+                # 2. Try RGBWW / RGBW (Strip extra white channels)
+                elif "rgbww_color" in attrs:
+                    final_rgb = self._to_rgb_list(attrs["rgbww_color"])
+                elif "rgbw_color" in attrs:
+                    final_rgb = self._to_rgb_list(attrs["rgbw_color"])
 
-            # 4. Try HS
-            if not rgb and "hs_color" in attrs:
-                try:
-                    h, s = attrs["hs_color"]
-                    rgb_tuple = color_util.color_hs_to_RGB(h, s)
-                    rgb = self._to_rgb_list(rgb_tuple)
-                except Exception:
-                    pass
+                # 3. Try HS Color (Convert to RGB)
+                elif "hs_color" in attrs:
+                    try:
+                        h, s = attrs["hs_color"]
+                        # Convert HS to RGB
+                        rgb_tuple = color_util.color_hs_to_RGB(h, s)
+                        final_rgb = self._to_rgb_list(rgb_tuple)
+                    except Exception:
+                        pass
+                
+                # 4. Try XY Color (Convert to RGB - common for Zigbee/Hue)
+                elif "xy_color" in attrs:
+                    try:
+                        x, y = attrs["xy_color"]
+                        # Convert XY to RGB (assuming max brightness for color wheel)
+                        rgb_tuple = color_util.color_xy_to_RGB(x, y, 255)
+                        final_rgb = self._to_rgb_list(rgb_tuple)
+                    except Exception:
+                        pass
 
-            # Default to black if off or unknown
-            payload["rgb_color"] = rgb or [0, 0, 0]
+            payload["rgb_color"] = final_rgb or [0, 0, 0]
 
         elif ctype == "select":
             payload["option"] = state.state
