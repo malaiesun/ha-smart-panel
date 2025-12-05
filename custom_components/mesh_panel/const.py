@@ -24,6 +24,7 @@ CONF_MIN = "min"
 CONF_MAX = "max"
 CONF_STEP = "step"
 CONF_OPTIONS = "options"
+CONF_ATTRIBUTE = "attribute"
 
 # Control types
 CONTROL_TYPES = [
