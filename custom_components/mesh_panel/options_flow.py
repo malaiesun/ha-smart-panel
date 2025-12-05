@@ -450,18 +450,24 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             await self._save_control(stay_in_flow=True)
             return await self.async_step_controls()
 
-        desc = "Auto-detected dropdown options."
+        # Build readable text inside a fake "info" field
         if detected:
-            desc += "\n\nDetected:\n- " + "\n- ".join(detected)
+            info_text = "Detected options:\n" + "\n".join(f"- {o}" for o in detected)
         else:
-            desc += "\n\nNo options detected for this entity."
+            info_text = "No options detected for this entity."
 
         return self.async_show_form(
             step_id="control_select",
-            description=desc,
             data_schema=vol.Schema({
+                vol.Required("info", default=info_text): TextSelector(
+                    {
+                        "multiline": True,
+                        "readonly": True,
+                    }
+                ),
                 vol.Required("confirm", default=True): bool
-            })
+            }),
+            errors={}
         )
 
     # ---------------- Save helpers ----------------
