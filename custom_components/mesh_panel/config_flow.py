@@ -6,7 +6,6 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import DOMAIN, CONF_PANEL_ID, CONF_DEVICES
 from .options_flow import MeshPanelOptionsFlowHandler
 
-@config_entries.HANDLERS.register(DOMAIN)
 class MeshPanelConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for MESH Panel."""
     VERSION = 1
