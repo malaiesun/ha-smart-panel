@@ -151,35 +151,34 @@ def _range_for_attribute(hass: HomeAssistant, entity_id: str, attr: str) -> Tupl
 
 
 def _autodetect_select_options(hass: HomeAssistant, entity_id: str) -> List[str]:
+    """Aggressively try to find list options from an entity."""
+    if not entity_id:
+        return []
+        
     st = hass.states.get(entity_id)
     if not st:
         return []
 
-    domain = entity_id.split(".")[0]
-    attrs = st.attributes
+    # Common attributes that hold lists of options
+    candidates = [
+        "options",          # select, input_select
+        "source_list",      # media_player
+        "effect_list",      # light
+        "preset_modes",     # fan, climate
+        "hvac_modes",       # climate
+        "fan_mode_list",    # climate
+        "swing_modes",      # climate
+        "fan_speed_list",   # vacuum, fan (legacy)
+        "operation_list",   # legacy
+    ]
 
-    if domain == "input_select":
-        opts = attrs.get("options")
-        if isinstance(opts, list):
-            return [str(o) for o in opts]
-
-    if domain == "fan":
-        opts = attrs.get("preset_modes") or attrs.get("speed_list")
-        if isinstance(opts, list):
-            return [str(o) for o in opts]
-
-    if domain == "media_player":
-        opts = attrs.get("source_list")
-        if isinstance(opts, list):
-            return [str(o) for o in opts]
-
-    if domain == "light":
-        opts = attrs.get("effect_list")
-        if isinstance(opts, list):
-            return [str(o) for o in opts]
+    for attr in candidates:
+        val = st.attributes.get(attr)
+        if isinstance(val, list) and len(val) > 0:
+            # Return the first valid list we find, converted to strings
+            return [str(v) for v in val]
 
     return []
-
 
 class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
     """Visual options editor with staged changes and explicit Save."""
@@ -438,34 +437,51 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             })
         )
 
-# ---------------- Select config (AUTOFILL + MANUAL EDIT) ----------------
+# ---------------- Select config (AUTOFILL + COMMA SEPARATED) ----------------
 
     async def async_step_control_select(self, user_input=None):
         if user_input is not None:
-            # Save the manual or auto-detected input
-            self.control_data[CONF_OPTIONS] = user_input.get(CONF_OPTIONS, "")
+            raw_text = user_input.get(CONF_OPTIONS, "")
+            
+            # LOGIC: Always split by comma for storage
+            # This handles "Red, Green, Blue" -> "Red\nGreen\nBlue" (internal storage format)
+            if "," in raw_text:
+                cleaned_opts = [o.strip() for o in raw_text.split(",") if o.strip()]
+                self.control_data[CONF_OPTIONS] = "\n".join(cleaned_opts)
+            else:
+                # Fallback if they somehow managed to type newlines or just one option
+                self.control_data[CONF_OPTIONS] = raw_text
+
             await self._save_control(stay_in_flow=True)
             return await self.async_step_controls()
 
-        # Determine default value
+        # --- PRE-FILL LOGIC ---
         default_text = self.control_data.get(CONF_OPTIONS, "")
         
-        # If no options saved yet, try to auto-detect
+        # If empty, try to auto-detect
         if not default_text:
             ent = self.control_data.get(CONF_ENTITY, "")
             detected = _autodetect_select_options(self.hass, ent)
             if detected:
-                default_text = "\n".join(detected)
+                # Join with comma+space so it looks nice in the text box
+                default_text = ", ".join(detected)
+
+        # If we have existing newline-separated data (from previous saves), 
+        # convert it to commas for display so the user can edit it easily.
+        elif "\n" in default_text:
+            default_text = default_text.replace("\n", ", ")
 
         return self.async_show_form(
             step_id="control_select",
             data_schema=vol.Schema({
-                vol.Required(CONF_OPTIONS, default=default_text): TextSelector(
-                    TextSelectorConfig(multiline=True)
-                ),
-            })
+                # We use a standard TextSelector (single line by default)
+                # This prevents the "Enter key submit" confusion.
+                vol.Required(CONF_OPTIONS, default=default_text): TextSelector(),
+            }),
+            description_placeholders={
+                "entity_id": self.control_data.get(CONF_ENTITY, "Unknown"),
+            }
         )
-
     # ---------------- Save helpers ----------------
 
     async def _save_control(self, stay_in_flow: bool = False):
