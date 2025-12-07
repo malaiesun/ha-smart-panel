@@ -20,10 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def decode_entity(raw: str):
-    """
-    Decode 'entity (attr)' -> ('entity', 'attr').
-    The 'raw' string is the ID the panel knows. 
-    """
+    """Decode 'entity (attr)' -> ('entity', 'attr')."""
     raw = raw.strip()
     if "(" in raw and raw.endswith(")"):
         try:
@@ -41,7 +38,6 @@ class MeshPanelController:
     def __init__(self, hass: HomeAssistant, panel_id: str, devices_data: list):
         self.hass = hass
         self.panel_id = panel_id
-        # Topic definitions
         self.topic_ui = TOPIC_UI_FMT.format(panel_id=panel_id)
         self.topic_state = TOPIC_STATE_FMT.format(panel_id=panel_id)
         self.topic_action = TOPIC_ACTION_FMT.format(panel_id=panel_id)
@@ -135,7 +131,7 @@ class MeshPanelController:
                 self._watched.add(ha_entity)
 
     def _find_control(self, raw_id):
-        """Find a control by its EXACT encoded id (the string in config)."""
+        """Find a control by its EXACT encoded id (config name)."""
         for dev in self.devices_config:
             for control in dev.get("controls", []):
                 if control.get("entity") == raw_id:
@@ -143,7 +139,7 @@ class MeshPanelController:
         return None
 
     async def _register_services(self):
-        """Register notification service for this panel."""
+        """Notify support."""
         async def _notify(call):
             payload = {
                 "title": call.data.get("title", "Info"),
@@ -157,9 +153,10 @@ class MeshPanelController:
             self.hass.services.async_register(DOMAIN, svc_name, _notify)
 
     async def _handle_action(self, payload: str):
-        """Handle commands coming FROM the panel."""
+        """Handle commands FROM the panel."""
         try:
             data = json.loads(payload or "{}")
+            # Panel sends "id" for commands
             raw_id = data.get("id")
             if not raw_id:
                 return
@@ -188,7 +185,6 @@ class MeshPanelController:
                 val = int(data["value"])
 
                 if attribute:
-                    # Handle specific attribute sliders
                     if domain == "light":
                         service = SERVICE_TURN_ON
                         numeric_attrs = {
@@ -225,7 +221,6 @@ class MeshPanelController:
                         service = "set_value"
                         service_data["value"] = val
                 else:
-                    # Handle main entity sliders
                     if domain == "light":
                         service = SERVICE_TURN_ON
                         service_data[ATTR_BRIGHTNESS] = val
@@ -278,11 +273,7 @@ class MeshPanelController:
             return None
 
     def _get_active_rgb(self, state):
-        """
-        Robustly determine RGB color from state attributes.
-        Handles: RGB, HS, XY, and Color Temp.
-        This fixes the issue where the wheel turns black if the light is white.
-        """
+        """Robustly determine RGB color from state attributes."""
         # 1. Check explicit RGB
         rgb = state.attributes.get(ATTR_RGB_COLOR)
         if rgb:
@@ -298,7 +289,7 @@ class MeshPanelController:
         if xy:
             return color_util.color_xy_to_RGB(*xy)
 
-        # 4. Check Color Temp (Convert to RGB so the wheel shows the warmth)
+        # 4. Check Color Temp
         kelvin = state.attributes.get("color_temp_kelvin")
         if kelvin:
             return color_util.color_temperature_kelvin_to_rgb(kelvin)
@@ -312,18 +303,16 @@ class MeshPanelController:
             except:
                 pass
 
-        # Default to white if on, black if off
         return [255, 255, 255] if state.state == "on" else [0, 0, 0]
 
     async def _publish_entity_state(self, raw_id: str):
-        """Send entity update to panel."""
+        """Send ONLY ONE entity update to panel."""
         ha_entity, attribute = decode_entity(raw_id)
         state = self.hass.states.get(ha_entity)
         if not state:
             return
 
-        # CRITICAL: The C++ code uses doc["entity"] to identify the widget.
-        # We must send the raw_id (the config name) in the "entity" field.
+        # FIXED: Send "entity" key because C++ code reads doc["entity"]
         payload = {"entity": raw_id}
         
         control = self._find_control(raw_id)
@@ -346,57 +335,41 @@ class MeshPanelController:
 
         # --- SLIDER ---
         elif ctype == "slider":
-            val = 0
+            val = None
             if attribute:
-                val = state.attributes.get(attribute, 0)
+                val = state.attributes.get(attribute)
             elif domain == "light":
-                val = state.attributes.get(ATTR_BRIGHTNESS, 0)
+                val = state.attributes.get(ATTR_BRIGHTNESS)
             elif domain == "media_player":
                 val = (state.attributes.get("volume_level", 0) * 100)
             elif domain == "fan":
-                val = state.attributes.get("percentage", 0)
+                val = state.attributes.get("percentage")
             elif domain == "climate":
-                val = state.attributes.get("temperature", 0)
+                val = state.attributes.get("temperature")
             else:
-                try:
-                    val = float(state.state)
-                except:
-                    val = 0
-            
+                val = state.state
+
             try:
                 payload["value"] = int(float(val))
-            except:
+            except (ValueError, TypeError):
                 payload["value"] = 0
 
-        # --- COLOR (Fixed) ---
+        # --- COLOR ---
         elif ctype == "color":
             if state.state == "off":
                 payload["rgb_color"] = [0, 0, 0]
             else:
-                # Use the new robust helper
-                payload["rgb_color"] = self._get_active_rgb(state)
+                payload['rgb_color'] = self._get_active_rgb(state)
 
-        # --- TIME (Fixed) ---
+        # --- TIME (Formatted for C++ sscanf %d:%d) ---
         elif ctype == "time":
             try:
-                raw_time = state.state # Expecting HH:MM:SS or HH:MM
-                parts = raw_time.split(":")
-                if len(parts) >= 2:
-                    hour = int(parts[0])
-                    minute = int(parts[1])
-                    
-                    # Round to nearest 5 mins for cleaner UI
-                    # This matches logic in C++ (sscanf %d:%d)
-                    minute = int(round(minute / 5.0) * 5.0)
-                    if minute == 60:
-                        minute = 0
-                        hour = (hour + 1) % 24
-                        
-                    payload["time"] = f"{hour:02d}:{minute:02d}"
+                val = state.state.split(":")
+                if len(val) >= 2:
+                    payload["time"] = f"{val[0]}:{val[1]}"
                 else:
                     payload["time"] = "00:00"
-            except Exception as e:
-                _LOGGER.warning("Time parse error for %s: %s", raw_id, e)
+            except:
                 payload["time"] = "00:00"
 
         # --- SELECT ---
