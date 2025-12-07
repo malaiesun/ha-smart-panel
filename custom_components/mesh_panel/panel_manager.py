@@ -276,9 +276,11 @@ class MeshPanelController:
 
     async def _publish_entity_state(self, raw_id: str):
         """Send ONLY ONE entity update to panel."""
+        _LOGGER.debug("Publishing state for raw_id: %s", raw_id)
         ha_entity, attribute = decode_entity(raw_id)
         state = self.hass.states.get(ha_entity)
         if not state:
+            _LOGGER.debug("No state found for %s, aborting publish.", ha_entity)
             return
 
         payload = {"entity": raw_id}
@@ -289,6 +291,7 @@ class MeshPanelController:
             for dev in self.devices_config:
                 if dev.get("state_entity") == raw_id:
                     payload["state"] = state.state
+                    _LOGGER.debug("Publishing to %s: %s", self.topic_state, json.dumps(payload))
                     await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
                     return
             return
@@ -336,12 +339,14 @@ class MeshPanelController:
                     hour = (hour + 1) % 24
 
                 payload["time"] = f"{hour:02d}:{minute:02d}"
-            except:
+            except Exception as e:
+                _LOGGER.debug("Error processing time for %s: %s", raw_id, e)
                 payload["time"] = "00:00"
 
         elif ctype == "select":
             payload["option"] = state.state
 
+        _LOGGER.debug("Publishing to %s: %s", self.topic_state, json.dumps(payload))
         await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
 
     @callback
@@ -352,6 +357,7 @@ class MeshPanelController:
             return
 
         entity_id = event.data["entity_id"]
+        _LOGGER.debug("State change event for: %s", entity_id)
         raw_ids_to_update = set()
 
         for dev in self.devices_config:
@@ -366,5 +372,7 @@ class MeshPanelController:
                 if ha_entity == entity_id:
                     raw_ids_to_update.add(ent)
 
-        for raw_id in raw_ids_to_update:
-            self.hass.async_create_task(self._publish_entity_state(raw_id))
+        if raw_ids_to_update:
+            _LOGGER.debug("Found matching raw_ids to update: %s", raw_ids_to_update)
+            for raw_id in raw_ids_to_update:
+                self.hass.async_create_task(self._publish_entity_state(raw_id))
