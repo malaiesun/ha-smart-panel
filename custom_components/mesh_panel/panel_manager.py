@@ -1,4 +1,4 @@
-#"Manages a MESH panel with proper entity/attribute decoding and one-by-one live update syncing."
+"""Manages a MESH panel with proper entity/attribute decoding and one-by-one live update syncing."""
 import json
 import logging
 import copy
@@ -20,7 +20,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def decode_entity(raw: str):
-    """Decode 'entity (attr)' → ('entity', 'attr')."""
+    """
+    Decode 'entity (attr)' -> ('entity', 'attr').
+    The 'raw' string is the ID the panel knows. 
+    """
     raw = raw.strip()
     if "(" in raw and raw.endswith(")"):
         try:
@@ -38,6 +41,7 @@ class MeshPanelController:
     def __init__(self, hass: HomeAssistant, panel_id: str, devices_data: list):
         self.hass = hass
         self.panel_id = panel_id
+        # Topic definitions
         self.topic_ui = TOPIC_UI_FMT.format(panel_id=panel_id)
         self.topic_state = TOPIC_STATE_FMT.format(panel_id=panel_id)
         self.topic_action = TOPIC_ACTION_FMT.format(panel_id=panel_id)
@@ -119,23 +123,19 @@ class MeshPanelController:
 
     def _collect_watched_entities(self):
         """Collect entities to listen for."""
-        _LOGGER.debug("Collecting entities to watch...")
         self._watched.clear()
         for dev in self.devices_config:
             if dev.get("state_entity"):
                 self._watched.add(dev["state_entity"])
-                _LOGGER.debug("... watching device state_entity: %s", dev["state_entity"])
             for control in dev.get("controls", []):
                 ent = control.get("entity")
                 if not ent:
                     continue
                 ha_entity, _ = decode_entity(ent)
                 self._watched.add(ha_entity)
-                _LOGGER.debug("... watching control entity: %s (from %s)", ha_entity, ent)
-        _LOGGER.debug("Finished collecting. Watched set: %s", self._watched)
 
     def _find_control(self, raw_id):
-        """Find a control by its EXACT encoded id."""
+        """Find a control by its EXACT encoded id (the string in config)."""
         for dev in self.devices_config:
             for control in dev.get("controls", []):
                 if control.get("entity") == raw_id:
@@ -143,7 +143,7 @@ class MeshPanelController:
         return None
 
     async def _register_services(self):
-        """Notify support."""
+        """Register notification service for this panel."""
         async def _notify(call):
             payload = {
                 "title": call.data.get("title", "Info"),
@@ -157,7 +157,7 @@ class MeshPanelController:
             self.hass.services.async_register(DOMAIN, svc_name, _notify)
 
     async def _handle_action(self, payload: str):
-        """Handle commands from the panel."""
+        """Handle commands coming FROM the panel."""
         try:
             data = json.loads(payload or "{}")
             raw_id = data.get("id")
@@ -188,6 +188,7 @@ class MeshPanelController:
                 val = int(data["value"])
 
                 if attribute:
+                    # Handle specific attribute sliders
                     if domain == "light":
                         service = SERVICE_TURN_ON
                         numeric_attrs = {
@@ -224,6 +225,7 @@ class MeshPanelController:
                         service = "set_value"
                         service_data["value"] = val
                 else:
+                    # Handle main entity sliders
                     if domain == "light":
                         service = SERVICE_TURN_ON
                         service_data[ATTR_BRIGHTNESS] = val
@@ -275,90 +277,146 @@ class MeshPanelController:
         except:
             return None
 
+    def _get_active_rgb(self, state):
+        """
+        Robustly determine RGB color from state attributes.
+        Handles: RGB, HS, XY, and Color Temp.
+        This fixes the issue where the wheel turns black if the light is white.
+        """
+        # 1. Check explicit RGB
+        rgb = state.attributes.get(ATTR_RGB_COLOR)
+        if rgb:
+            return self._to_rgb_list(rgb)
+            
+        # 2. Check HS (Hue/Saturation)
+        hs = state.attributes.get("hs_color")
+        if hs:
+            return color_util.color_hs_to_RGB(*hs)
+
+        # 3. Check XY 
+        xy = state.attributes.get("xy_color")
+        if xy:
+            return color_util.color_xy_to_RGB(*xy)
+
+        # 4. Check Color Temp (Convert to RGB so the wheel shows the warmth)
+        kelvin = state.attributes.get("color_temp_kelvin")
+        if kelvin:
+            return color_util.color_temperature_kelvin_to_rgb(kelvin)
+            
+        # Legacy Mireds check
+        mireds = state.attributes.get("color_temp")
+        if mireds:
+            try:
+                kelvin = int(1000000 / mireds)
+                return color_util.color_temperature_kelvin_to_rgb(kelvin)
+            except:
+                pass
+
+        # Default to white if on, black if off
+        return [255, 255, 255] if state.state == "on" else [0, 0, 0]
+
     async def _publish_entity_state(self, raw_id: str):
-        """Send ONLY ONE entity update to panel."""
-        _LOGGER.debug("Publishing state for raw_id: %s", raw_id)
+        """Send entity update to panel."""
         ha_entity, attribute = decode_entity(raw_id)
         state = self.hass.states.get(ha_entity)
         if not state:
-            _LOGGER.debug("No state found for %s, aborting publish.", ha_entity)
             return
 
+        # CRITICAL: The C++ code uses doc["entity"] to identify the widget.
+        # We must send the raw_id (the config name) in the "entity" field.
         payload = {"entity": raw_id}
+        
         control = self._find_control(raw_id)
 
+        # Handle Device State Entity (Header status)
         if not control:
-            # device state entity
             for dev in self.devices_config:
                 if dev.get("state_entity") == raw_id:
                     payload["state"] = state.state
-                    _LOGGER.debug("Publishing to %s: %s", self.topic_state, json.dumps(payload))
                     await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
                     return
-            _LOGGER.debug("Could not find control or state_entity for raw_id: %s", raw_id)
             return
 
         ctype = control.get("type")
         domain = ha_entity.split(".")[0]
 
+        # --- SWITCH ---
         if ctype == "switch":
             payload["state"] = state.state
 
+        # --- SLIDER ---
         elif ctype == "slider":
-            val = None
+            val = 0
             if attribute:
-                val = state.attributes.get(attribute)
+                val = state.attributes.get(attribute, 0)
             elif domain == "light":
-                val = state.attributes.get(ATTR_BRIGHTNESS)
+                val = state.attributes.get(ATTR_BRIGHTNESS, 0)
+            elif domain == "media_player":
+                val = (state.attributes.get("volume_level", 0) * 100)
+            elif domain == "fan":
+                val = state.attributes.get("percentage", 0)
+            elif domain == "climate":
+                val = state.attributes.get("temperature", 0)
             else:
-                val = state.state
-
+                try:
+                    val = float(state.state)
+                except:
+                    val = 0
+            
             try:
                 payload["value"] = int(float(val))
-            except (ValueError, TypeError):
+            except:
                 payload["value"] = 0
 
+        # --- COLOR (Fixed) ---
         elif ctype == "color":
-            rgb_tuple = state.attributes.get(ATTR_RGB_COLOR)
-            # Ensure payload is a list, not a tuple, for JSON.
-            payload['rgb_color'] = self._to_rgb_list(rgb_tuple) or [0, 0, 0]
+            if state.state == "off":
+                payload["rgb_color"] = [0, 0, 0]
+            else:
+                # Use the new robust helper
+                payload["rgb_color"] = self._get_active_rgb(state)
 
-        elif ctype == "text":
-            payload["value"] = state.state
-
+        # --- TIME (Fixed) ---
         elif ctype == "time":
             try:
-                # State is HH:MM:SS, panel wants HH:MM (rounded)
-                time_parts = state.state.split(":")
-                hour = int(time_parts[0])
-                minute = int(time_parts[1])
-
-                # Round to nearest 5 minutes
-                minute = int(round(minute / 5.0) * 5.0)
-                if minute >= 60:
-                    minute = 0
-                    hour = (hour + 1) % 24
-
-                payload["time"] = f"{hour:02d}:{minute:02d}"
+                raw_time = state.state # Expecting HH:MM:SS or HH:MM
+                parts = raw_time.split(":")
+                if len(parts) >= 2:
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                    
+                    # Round to nearest 5 mins for cleaner UI
+                    # This matches logic in C++ (sscanf %d:%d)
+                    minute = int(round(minute / 5.0) * 5.0)
+                    if minute == 60:
+                        minute = 0
+                        hour = (hour + 1) % 24
+                        
+                    payload["time"] = f"{hour:02d}:{minute:02d}"
+                else:
+                    payload["time"] = "00:00"
             except Exception as e:
-                _LOGGER.debug("Error processing time for %s: %s", raw_id, e)
+                _LOGGER.warning("Time parse error for %s: %s", raw_id, e)
                 payload["time"] = "00:00"
 
+        # --- SELECT ---
         elif ctype == "select":
             payload["option"] = state.state
 
-        _LOGGER.debug("Publishing to %s: %s", self.topic_state, json.dumps(payload))
+        # --- TEXT ---
+        elif ctype == "text":
+            payload["value"] = state.state
+
         await mqtt.async_publish(self.hass, self.topic_state, json.dumps(payload))
 
     @callback
     def _handle_state_event(self, event):
-        """HA entity changed → push update."""
+        """HA entity changed -> push update."""
         new_state = event.data.get("new_state")
         if not new_state:
             return
 
         entity_id = event.data["entity_id"]
-        _LOGGER.debug("State change event for: %s", entity_id)
         raw_ids_to_update = set()
 
         for dev in self.devices_config:
@@ -374,6 +432,5 @@ class MeshPanelController:
                     raw_ids_to_update.add(ent)
 
         if raw_ids_to_update:
-            _LOGGER.debug("Found matching raw_ids to update: %s", raw_ids_to_update)
             for raw_id in raw_ids_to_update:
                 self.hass.async_create_task(self._publish_entity_state(raw_id))
