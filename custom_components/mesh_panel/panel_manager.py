@@ -140,6 +140,18 @@ class MeshPanelController:
                     return control
         return None
 
+    def _find_light_color_control(self, base_entity_id):
+        """Find the 'color' control for a given light entity."""
+        for dev in self.devices_config:
+            for control in dev.get("controls", []):
+                ent = control.get("entity")
+                if not ent:
+                    continue
+                ha_entity, _ = decode_entity(ent)
+                if ha_entity == base_entity_id and control.get("type") == "color":
+                    return ent
+        return None
+
     async def _register_services(self):
         """Notify support."""
         async def _notify(call):
@@ -408,17 +420,11 @@ class MeshPanelController:
                 if ha_entity == entity_id:
                     raw_ids_to_update.add(ent)
         
-        # If the changed entity is a light, also send an update for the color
+        # If a light entity changes, always update its main color control
         if entity_id.startswith("light."):
-            for dev in self.devices_config:
-                for control in dev.get("controls", []):
-                    ent = control.get("entity")
-                    if not ent:
-                        continue
-                    ha_entity, _ = decode_entity(ent)
-                    if ha_entity == entity_id and control.get("type") == "color":
-                        raw_ids_to_update.add(ent)
-                        break
+            color_control_id = self._find_light_color_control(entity_id)
+            if color_control_id:
+                raw_ids_to_update.add(color_control_id)
 
         if raw_ids_to_update:
             for raw_id in raw_ids_to_update:
