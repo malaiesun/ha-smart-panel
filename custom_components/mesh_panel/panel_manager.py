@@ -27,7 +27,7 @@ from .const import (
     TOPIC_ACTION_FMT, TOPIC_NOTIFY_FMT,
     SIGNAL_MQTT_PAYLOAD,
 )
-from .const import SIGNAL_MQTT_PAYLOAD
+
 
 _LOGGER = logging.getLogger(__name__)
 

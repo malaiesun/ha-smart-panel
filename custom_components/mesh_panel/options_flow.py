@@ -1,11 +1,8 @@
 """
 Options Flow for MESH Smart Panel
-Handles devices + controls with:
-- Numeric-only attribute filtering for sliders
-- Big sensible slider ranges (entity-driven where possible)
-- Add-Another flow (doesn't finish until Save & Exit)
-- Auto-detected select options (input_select/fan/media_player/light effects)
-- Proper "Done" navigation
+- Consistent Back + Save & Exit on every screen
+- Sensible defaults for grid/row/button styling
+- Button YAML action editor (paste from HA Dev Tools)
 """
 
 from __future__ import annotations
@@ -20,13 +17,16 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import (
-    TextSelector,TextSelectorConfig,
+    TextSelector, TextSelectorConfig,
     SelectSelector, SelectSelectorConfig, SelectSelectorMode,
     EntitySelector,
     IconSelector,
     NumberSelector, NumberSelectorConfig,
-    ActionSelector,
+    ActionSelector,  # kept for power users (optional)
 )
+
+# yaml is available in HA venv; safe_load used for pasted YAML
+import yaml
 
 from .const import (
     DOMAIN,
@@ -44,7 +44,41 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# --------- Attribute helpers ---------
+# -------------------------- sensible UI defaults --------------------------
+
+DEFAULT_GRID = {
+    CONF_GRID_LABEL: "Scenes",
+    CONF_GRID_BG: "#101010",
+    CONF_GRID_RADIUS: "12",
+    CONF_GRID_PADDING: "10",
+    CONF_ROWS: [],
+}
+
+DEFAULT_ROW = {
+    CONF_ROW_HEIGHT: 1.0,
+    CONF_ROW_BG: "#1a1a1a",
+    CONF_ROW_RADIUS: "8",
+    CONF_ROW_PADDING: "6",
+    CONF_BUTTONS: [],
+}
+
+DEFAULT_BUTTON = {
+    CONF_ID: "",
+    CONF_BUTTON_WIDTH: 1,
+    CONF_LABEL_FORMULA: "Press",
+    CONF_TEXT_COLOR_FORMULA: "#FFFFFF",
+    CONF_BG_COLOR_FORMULA: "#2d2d2d",
+    CONF_ACTION: {},  # will be filled from YAML or ActionSelector
+}
+
+# --------- Attribute helpers (kept as in your version) ---------
+
+def _is_number(val: Any) -> bool:
+    try:
+        float(val)
+        return True
+    except Exception:
+        return False
 
 _NUMERIC_LIGHT_ATTRS = {
     "brightness",
@@ -54,13 +88,6 @@ _NUMERIC_LIGHT_ATTRS = {
     "max_mireds",
     "min_color_temp_kelvin",
     "max_color_temp_kelvin",
-}
-
-_PSEUDO_LIGHT_ATTRS = {
-    "hs_hue",
-    "hs_saturation",
-    "xy_x",
-    "xy_y",
 }
 
 _DEFAULT_RANGES = {
@@ -78,18 +105,7 @@ _DEFAULT_RANGES = {
     "__generic__": (0, 999999, 1),
 }
 
-
-def _is_number(val: Any) -> bool:
-    try:
-        float(val)
-        return True
-    except Exception:
-        return False
-
-
-def _numeric_attribute_names_for_entity(
-    hass: HomeAssistant, entity_id: str
-) -> List[str]:
+def _numeric_attribute_names_for_entity(hass: HomeAssistant, entity_id: str) -> List[str]:
     names: List[str] = []
     st = hass.states.get(entity_id)
     if not st:
@@ -115,28 +131,18 @@ def _numeric_attribute_names_for_entity(
         if "brightness" not in names:
             names.append("brightness")
 
-    noisy = {
-        "supported_color_modes", "supported_features",
-        "restored", "icon", "friendly_name", "effect_list"
-    }
+    noisy = {"supported_color_modes","supported_features","restored","icon","friendly_name","effect_list"}
     names = [n for n in names if n not in noisy]
-
-    if not names:
-        names = ["state"]
-
-    return names
-
+    return names or ["state"]
 
 def _range_for_attribute(hass: HomeAssistant, entity_id: str, attr: str) -> Tuple[int, int, int]:
     st = hass.states.get(entity_id)
-
     if st:
         if attr == "color_temp_kelvin":
             lo = st.attributes.get("min_color_temp_kelvin")
             hi = st.attributes.get("max_color_temp_kelvin")
             if _is_number(lo) and _is_number(hi):
                 return int(lo), int(hi), 50
-
         if attr == "color_temp":
             lo = st.attributes.get("min_mireds")
             hi = st.attributes.get("max_mireds")
@@ -153,39 +159,27 @@ def _range_for_attribute(hass: HomeAssistant, entity_id: str, attr: str) -> Tupl
         return (10, 40, 1)
     if domain == "media_player":
         return (0, 100, 1)
-
     return _DEFAULT_RANGES["__generic__"]
 
-
 def _autodetect_select_options(hass: HomeAssistant, entity_id: str) -> List[str]:
-    """Aggressively try to find list options from an entity."""
     if not entity_id:
         return []
-        
     st = hass.states.get(entity_id)
     if not st:
         return []
 
-    # Common attributes that hold lists of options
     candidates = [
-        "options",          # select, input_select
-        "source_list",      # media_player
-        "effect_list",      # light
-        "preset_modes",     # fan, climate
-        "hvac_modes",       # climate
-        "fan_mode_list",    # climate
-        "swing_modes",      # climate
-        "fan_speed_list",   # vacuum, fan (legacy)
-        "operation_list",   # legacy
+        "options", "source_list", "effect_list",
+        "preset_modes", "hvac_modes", "fan_mode_list",
+        "swing_modes", "fan_speed_list", "operation_list",
     ]
-
     for attr in candidates:
         val = st.attributes.get(attr)
-        if isinstance(val, list) and len(val) > 0:
-            # Return the first valid list we find, converted to strings
+        if isinstance(val, list) and val:
             return [str(v) for v in val]
-
     return []
+
+# =============================== Options Flow ===============================
 
 class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
     """Visual options editor with staged changes and explicit Save."""
@@ -201,6 +195,46 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         self.current_row_index: int | None = None
         self.current_button_index: int | None = None
 
+        self._errors: Dict[str, str] = {}
+
+    # ---------------- util helpers ----------------
+
+    async def _save_control(self, stay_in_flow: bool = False):
+        devices = self.working.get(CONF_DEVICES, [])
+        device = next((d for d in devices if d[CONF_ID] == self.current_device_id), None)
+        if not device:
+            return self.async_abort(reason="unknown")
+
+        controls = device.get(CONF_CONTROLS, [])
+
+        if self.current_control_id:
+            for i, c in enumerate(controls):
+                if c[CONF_ID] == self.current_control_id:
+                    controls[i] = {**c, **self.control_data}
+                    break
+        else:
+            self.control_data[CONF_ID] = str(uuid.uuid4())
+            controls.append(self.control_data)
+            self.current_control_id = self.control_data[CONF_ID]
+
+        device[CONF_CONTROLS] = controls
+        self.working[CONF_DEVICES] = devices
+
+        if not stay_in_flow:
+            return await self._do_save_and_exit()
+
+    async def _do_save_and_exit(self):
+        res = self.async_create_entry(title="", data=self.working)
+        try:
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        except Exception as e:
+            _LOGGER.debug("Reload after save failed: %s", e)
+        return res
+
+    def _with_nav(self, options: Dict[str, str]) -> Dict[str, str]:
+        """Append Back + Save & Exit everywhere."""
+        return {**options, "back": "Back", "save_exit": "Save & Exit"}
+
     # ---------------- Devices root ----------------
 
     async def async_step_init(self, user_input=None):
@@ -211,17 +245,20 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_device()
             if act == "save_exit":
                 return await self._do_save_and_exit()
+            if act == "back":
+                # root: just save & exit equivalently
+                return await self._do_save_and_exit()
+
             self.current_device_id = act
             return await self.async_step_device_menu()
 
         devices = self.working.get(CONF_DEVICES, [])
         dev_map = {d[CONF_ID]: d[CONF_NAME] for d in devices}
 
-        options = {
+        options = self._with_nav({
             "add_device": "Add a new device",
             **dev_map,
-            "save_exit": "Save & Exit",
-        }
+        })
 
         return self.async_show_form(
             step_id="init",
@@ -235,28 +272,25 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_device_menu(self, user_input=None):
         if user_input:
             act = user_input["action"]
-            if act == "edit":
-                return await self.async_step_device()
-            if act == "controls":
-                return await self.async_step_controls()
+            if act == "edit":          return await self.async_step_device()
+            if act == "controls":      return await self.async_step_controls()
             if act == "delete":
                 self.working[CONF_DEVICES] = [
                     d for d in self.working.get(CONF_DEVICES, [])
                     if d[CONF_ID] != self.current_device_id
                 ]
                 return await self.async_step_init()
-            if act == "back":
-                return await self.async_step_init()
+            if act == "save_exit":     return await self._do_save_and_exit()
+            if act == "back":          return await self.async_step_init()
 
         return self.async_show_form(
             step_id="device_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
+                vol.Required("action"): vol.In(self._with_nav({
                     "edit": "Edit Device",
                     "controls": "Manage Controls",
                     "delete": "Delete Device",
-                    "back": "Back",
-                })
+                }))
             })
         )
 
@@ -313,22 +347,20 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 self.current_control_id = None
                 self.control_data = {}
                 return await self.async_step_control()
-            if act == "done":
-                return await self.async_step_device_menu()
+            if act == "save_exit": return await self._do_save_and_exit()
+            if act == "back":      return await self.async_step_device_menu()
 
             self.current_control_id = act
             return await self.async_step_control_menu()
 
         ctrl_map = {c[CONF_ID]: c[CONF_LABEL] for c in controls}
-
         return self.async_show_form(
             step_id="controls",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
+                vol.Required("action"): vol.In(self._with_nav({
                     "add": "Add a new control",
                     **ctrl_map,
-                    "done": "Done",
-                })
+                }))
             })
         )
 
@@ -337,8 +369,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_control_menu(self, user_input=None):
         if user_input:
             act = user_input["action"]
-            if act == "edit":
-                return await self.async_step_control()
+            if act == "edit":      return await self.async_step_control()
             if act == "delete":
                 for d in self.working.get(CONF_DEVICES, []):
                     if d[CONF_ID] == self.current_device_id:
@@ -348,17 +379,16 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                         ]
                         break
                 return await self.async_step_controls()
-            if act == "back":
-                return await self.async_step_controls()
+            if act == "save_exit": return await self._do_save_and_exit()
+            if act == "back":      return await self.async_step_controls()
 
         return self.async_show_form(
             step_id="control_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
+                vol.Required("action"): vol.In(self._with_nav({
                     "edit": "Edit Control",
                     "delete": "Delete Control",
-                    "back": "Back",
-                })
+                }))
             })
         )
 
@@ -381,15 +411,20 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             self.control_data.update(user_input)
 
             if self.control_data.get(CONF_TYPE) == "button_grid":
+                # ensure grid defaults
+                self.control_data.setdefault(CONF_GRID, copy.deepcopy(DEFAULT_GRID))
                 return await self.async_step_control_grid()
-            
             return await self.async_step_control_entity()
+
+        # default to switch unless changed
+        default_type = self.control_data.get(CONF_TYPE, "switch")
+        default_label = self.control_data.get(CONF_LABEL, "")
 
         return self.async_show_form(
             step_id="control",
             data_schema=vol.Schema({
-                vol.Required(CONF_LABEL, default=self.control_data.get(CONF_LABEL, "")): TextSelector(),
-                vol.Required(CONF_TYPE, default=self.control_data.get(CONF_TYPE, "switch")):
+                vol.Required(CONF_LABEL, default=default_label): TextSelector(),
+                vol.Required(CONF_TYPE, default=default_type):
                     SelectSelector(SelectSelectorConfig(
                         options=CONTROL_TYPES,
                         mode=SelectSelectorMode.DROPDOWN
@@ -397,9 +432,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             })
         )
 
-
     async def async_step_control_entity(self, user_input=None):
-        """Handle entity selection for a control."""
+        """Handle entity selection for non-grid controls."""
         if user_input:
             self.control_data.update(user_input)
 
@@ -431,16 +465,13 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input:
             self.control_data.update(user_input)
-
             attribute = self.control_data.get("attribute", "state")
             encoded = ent if attribute == "state" else f"{ent} ({attribute})"
             self.control_data[CONF_ENTITY] = encoded
-
             await self._save_control(stay_in_flow=True)
             return await self.async_step_controls()
 
         min_d, max_d, step_d = _range_for_attribute(hass, ent, attr_default)
-
         min_def = int(self.control_data.get(CONF_MIN, min_d))
         max_def = int(self.control_data.get(CONF_MAX, max_d))
         step_def = int(self.control_data.get(CONF_STEP, step_d))
@@ -458,282 +489,264 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
             })
         )
 
-# ---------------- Select config (AUTOFILL + COMMA SEPARATED) ----------------
+    # ---------------- Select config ----------------
 
     async def async_step_control_select(self, user_input=None):
         if user_input is not None:
             raw_text = user_input.get(CONF_OPTIONS, "")
-            
-            # LOGIC: Always split by comma for storage
-            # This handles "Red, Green, Blue" -> "Red\nGreen\nBlue" (internal storage format)
             if "," in raw_text:
-                cleaned_opts = [o.strip() for o in raw_text.split(",") if o.strip()]
-                self.control_data[CONF_OPTIONS] = "\n".join(cleaned_opts)
+                cleaned = [o.strip() for o in raw_text.split(",") if o.strip()]
+                self.control_data[CONF_OPTIONS] = "\n".join(cleaned)
             else:
-                # Fallback if they somehow managed to type newlines or just one option
                 self.control_data[CONF_OPTIONS] = raw_text
 
             await self._save_control(stay_in_flow=True)
             return await self.async_step_controls()
 
-        # --- PRE-FILL LOGIC ---
         default_text = self.control_data.get(CONF_OPTIONS, "")
-        
-        # If empty, try to auto-detect
         if not default_text:
             ent = self.control_data.get(CONF_ENTITY, "")
             detected = _autodetect_select_options(self.hass, ent)
             if detected:
-                # Join with comma+space so it looks nice in the text box
                 default_text = ", ".join(detected)
-
-        # If we have existing newline-separated data (from previous saves), 
-        # convert it to commas for display so the user can edit it easily.
         elif "\n" in default_text:
             default_text = default_text.replace("\n", ", ")
 
         return self.async_show_form(
             step_id="control_select",
             data_schema=vol.Schema({
-                # We use a standard TextSelector (single line by default)
-                # This prevents the "Enter key submit" confusion.
                 vol.Required(CONF_OPTIONS, default=default_text): TextSelector(),
-            }),
-            description_placeholders={
-                "entity_id": self.control_data.get(CONF_ENTITY, "Unknown"),
-            }
+            })
         )
 
-    # ---------------- Button Grid Rows & Buttons ----------------
+    # ======================= Button Grid (new UX) =======================
+
+    async def async_step_control_grid(self, user_input=None):
+        """Top-level Button Grid editor (with defaults)."""
+        grid = self.control_data.setdefault(CONF_GRID, copy.deepcopy(DEFAULT_GRID))
+
+        if user_input is not None:
+            grid.update(user_input)
+            self.control_data[CONF_GRID] = grid
+            return await self.async_step_grid_rows_menu()
+
+        return self.async_show_form(
+            step_id="control_grid",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_GRID_LABEL,  default=grid.get(CONF_GRID_LABEL,  DEFAULT_GRID[CONF_GRID_LABEL])): TextSelector(),
+                vol.Optional(CONF_GRID_BG,     default=grid.get(CONF_GRID_BG,     DEFAULT_GRID[CONF_GRID_BG])): TextSelector(),
+                vol.Optional(CONF_GRID_RADIUS, default=grid.get(CONF_GRID_RADIUS, DEFAULT_GRID[CONF_GRID_RADIUS])): TextSelector(),
+                vol.Optional(CONF_GRID_PADDING,default=grid.get(CONF_GRID_PADDING,DEFAULT_GRID[CONF_GRID_PADDING])): TextSelector(),
+                vol.Required("action"): vol.In(self._with_nav({
+                    "rows": "Manage Rows",
+                }))
+            }),
+        )
+
+    async def async_step_grid_rows_menu(self, user_input=None):
+        grid = self.control_data.setdefault(CONF_GRID, copy.deepcopy(DEFAULT_GRID))
+        rows = grid.setdefault(CONF_ROWS, [])
+
+        if user_input:
+            act = user_input["action"]
+            if act == "add_row":
+                self.current_row_index = None
+                return await self.async_step_row()
+            if act == "save_exit": return await self._do_save_and_exit()
+            if act == "back":      return await self.async_step_control_grid()
+            # select row index
+            self.current_row_index = int(act)
+            return await self.async_step_row_menu()
+
+        row_labels = {str(i): f"Row {i+1} — {len(r.get(CONF_BUTTONS, []))} buttons"
+                      for i, r in enumerate(rows)}
+
+        return self.async_show_form(
+            step_id="grid_rows_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In(self._with_nav({
+                    "add_row": "+ Add Row",
+                    **row_labels,
+                }))
+            })
+        )
 
     async def async_step_row_menu(self, user_input=None):
         if user_input:
-            action = user_input["action"]
-            if action == "edit_row":
-                return await self.async_step_row()
-            if action == "manage_buttons":
-                return await self.async_step_row_buttons_menu()
-            if action == "delete_row":
-                grid_data = self.control_data.get(CONF_GRID, {})
-                rows = grid_data.get(CONF_ROWS, [])
+            act = user_input["action"]
+            if act == "edit_row":    return await self.async_step_row()
+            if act == "buttons":     return await self.async_step_row_buttons_menu()
+            if act == "delete_row":
+                rows = self.control_data[CONF_GRID][CONF_ROWS]
                 rows.pop(self.current_row_index)
-                grid_data[CONF_ROWS] = rows
-                self.control_data[CONF_GRID] = grid_data
+                self.current_row_index = None
                 return await self.async_step_grid_rows_menu()
-            if action == "back":
-                return await self.async_step_grid_rows_menu()
+            if act == "save_exit":   return await self._do_save_and_exit()
+            if act == "back":        return await self.async_step_grid_rows_menu()
 
         return self.async_show_form(
             step_id="row_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
+                vol.Required("action"): vol.In(self._with_nav({
                     "edit_row": "Edit Row Properties",
-                    "manage_buttons": "Manage Buttons",
+                    "buttons": "Manage Buttons",
                     "delete_row": "Delete Row",
-                    "back": "Back to Rows",
-                })
+                }))
             })
         )
 
     async def async_step_row(self, user_input=None):
-        grid_data = self.control_data.get(CONF_GRID, {})
-        rows = grid_data.get(CONF_ROWS, [])
-        row_data = {}
-        if self.current_row_index is not None and self.current_row_index < len(rows):
-            row_data = rows[self.current_row_index]
+        grid = self.control_data.setdefault(CONF_GRID, copy.deepcopy(DEFAULT_GRID))
+        rows = grid.setdefault(CONF_ROWS, [])
+        row = (rows[self.current_row_index]
+               if self.current_row_index is not None and self.current_row_index < len(rows)
+               else copy.deepcopy(DEFAULT_ROW))
 
         if user_input is not None:
+            # merge submitted fields
+            row.update(user_input)
             if self.current_row_index is None:
-                user_input[CONF_BUTTONS] = []
-                rows.append(user_input)
+                rows.append(row)
                 self.current_row_index = len(rows) - 1
             else:
-                row_data.update(user_input)
-                rows[self.current_row_index] = row_data
-            
-            grid_data[CONF_ROWS] = rows
-            self.control_data[CONF_GRID] = grid_data
+                rows[self.current_row_index] = row
             return await self.async_step_row_menu()
 
         return self.async_show_form(
             step_id="row",
             data_schema=vol.Schema({
-                vol.Optional(CONF_ROW_HEIGHT, default=row_data.get(CONF_ROW_HEIGHT, 1.0)): NumberSelector(NumberSelectorConfig(min=0.1, max=10.0, step=0.1)),
-                vol.Optional(CONF_ROW_BG, default=row_data.get(CONF_ROW_BG, "")): TextSelector(),
-                vol.Optional(CONF_ROW_RADIUS, default=row_data.get(CONF_ROW_RADIUS, "")): TextSelector(),
-                vol.Optional(CONF_ROW_PADDING, default=row_data.get(CONF_ROW_PADDING, "")): TextSelector(),
+                vol.Required(CONF_ROW_HEIGHT,
+                    default=row.get(CONF_ROW_HEIGHT, DEFAULT_ROW[CONF_ROW_HEIGHT])):
+                    NumberSelector(NumberSelectorConfig(min=0.5, max=5.0, step=0.1)),
+                vol.Optional(CONF_ROW_BG,
+                    default=row.get(CONF_ROW_BG, DEFAULT_ROW[CONF_ROW_BG])): TextSelector(),
+                vol.Optional(CONF_ROW_PADDING,
+                    default=row.get(CONF_ROW_PADDING, DEFAULT_ROW[CONF_ROW_PADDING])): TextSelector(),
+                vol.Optional(CONF_ROW_RADIUS,
+                    default=row.get(CONF_ROW_RADIUS, DEFAULT_ROW[CONF_ROW_RADIUS])): TextSelector(),
+                vol.Required("action"): vol.In(self._with_nav({
+                    "buttons": "Manage Buttons",
+                }))
             })
         )
 
     async def async_step_row_buttons_menu(self, user_input=None):
-        grid_data = self.control_data.get(CONF_GRID, {})
-        row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
-        buttons = row_data.get(CONF_BUTTONS, [])
+        row = self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index]
+        buttons = row.setdefault(CONF_BUTTONS, [])
 
         if user_input:
-            action = user_input["action"]
-            if action == "add_button":
+            act = user_input["action"]
+            if act == "add_button":
                 self.current_button_index = None
                 return await self.async_step_button()
-            if action == "back":
-                return await self.async_step_row_menu()
-            
-            self.current_button_index = int(action)
+            if act == "save_exit": return await self._do_save_and_exit()
+            if act == "back":      return await self.async_step_row_menu()
+
+            self.current_button_index = int(act)
             return await self.async_step_button_menu()
 
-        button_map = {str(i): b.get(CONF_ID, f"Button {i+1}") for i, b in enumerate(buttons)}
+        button_names = {
+            str(i): f"{b.get(CONF_ID,'(no id)')} — {b.get(CONF_LABEL_FORMULA,'')}"
+            for i, b in enumerate(buttons)
+        }
 
         return self.async_show_form(
             step_id="row_buttons_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "add_button": "Add a new button",
-                    **button_map,
-                    "back": "Back to Row Menu",
-                })
+                vol.Required("action"): vol.In(self._with_nav({
+                    "add_button": "+ Add Button",
+                    **button_names,
+                }))
             })
         )
 
     async def async_step_button_menu(self, user_input=None):
         if user_input:
-            action = user_input["action"]
-            if action == "edit_button":
-                return await self.async_step_button()
-            if action == "delete_button":
-                grid_data = self.control_data.get(CONF_GRID, {})
-                row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
-                buttons = row_data.get(CONF_BUTTONS, [])
-                buttons.pop(self.current_button_index)
-                row_data[CONF_BUTTONS] = buttons
-                self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index] = row_data
+            act = user_input["action"]
+            if act == "edit":      return await self.async_step_button()
+            if act == "delete":
+                row = self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index]
+                row[CONF_BUTTONS].pop(self.current_button_index)
+                self.current_button_index = None
                 return await self.async_step_row_buttons_menu()
-            if action == "back":
-                return await self.async_step_row_buttons_menu()
+            if act == "save_exit": return await self._do_save_and_exit()
+            if act == "back":      return await self.async_step_row_buttons_menu()
 
         return self.async_show_form(
             step_id="button_menu",
             data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "edit_button": "Edit Button",
-                    "delete_button": "Delete Button",
-                    "back": "Back to Buttons",
-                })
+                vol.Required("action"): vol.In(self._with_nav({
+                    "edit": "Edit Button",
+                    "delete": "Delete Button",
+                }))
             })
         )
 
     async def async_step_button(self, user_input=None):
-        grid_data = self.control_data.get(CONF_GRID, {})
-        row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
-        buttons = row_data.get(CONF_BUTTONS, [])
-        button_data = {}
-        if self.current_button_index is not None and self.current_button_index < len(buttons):
-            button_data = buttons[self.current_button_index]
+        row = self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index]
+        buttons = row.setdefault(CONF_BUTTONS, [])
+        b = (buttons[self.current_button_index]
+             if self.current_button_index is not None and self.current_button_index < len(buttons)
+             else copy.deepcopy(DEFAULT_BUTTON))
+
+        # hold parse errors (yaml)
+        errors = {}
 
         if user_input is not None:
-            if self.current_button_index is None:
-                buttons.append(user_input)
-            else:
-                buttons[self.current_button_index] = user_input
-            
-            row_data[CONF_BUTTONS] = buttons
-            self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index] = row_data
-            return await self.async_step_row_buttons_menu()
+            # split out YAML text (if provided) and parse
+            yaml_text = user_input.pop("action_yaml", None)
+            if yaml_text is not None:
+                yaml_text = yaml_text.strip()
+                if yaml_text:
+                    try:
+                        parsed = yaml.safe_load(yaml_text)
+                        if not isinstance(parsed, dict):
+                            errors["base"] = "action_yaml_not_mapping"
+                        else:
+                            user_input[CONF_ACTION] = parsed
+                    except Exception as e:
+                        _LOGGER.debug("YAML parse error: %s", e)
+                        errors["base"] = "action_yaml_invalid"
+
+            # if no yaml provided and ActionSelector used, keep that value too
+            # (ActionSelector will be in user_input[CONF_ACTION] already)
+
+            if not errors:
+                # merge and store
+                b.update(user_input)
+                if self.current_button_index is None:
+                    buttons.append(b)
+                    self.current_button_index = len(buttons) - 1
+                else:
+                    buttons[self.current_button_index] = b
+                return await self.async_step_row_buttons_menu()
+
+        # Pretty default YAML if none set
+        existing_yaml = ""
+        if b.get(CONF_ACTION):
+            try:
+                existing_yaml = yaml.safe_dump(b[CONF_ACTION], sort_keys=False)  # show existing dict as YAML
+            except Exception:
+                existing_yaml = ""
+        if not existing_yaml:
+            existing_yaml = "service: homeassistant.toggle\ndata: {}\n# or:\n# action: localtuya.reload\n# data: {}\n"
+
+        # Use a multiline text selector for YAML editor
+        yaml_editor = TextSelector(TextSelectorConfig(multiline=True))
 
         return self.async_show_form(
             step_id="button",
             data_schema=vol.Schema({
-                vol.Required(CONF_ID, default=button_data.get(CONF_ID, "")): TextSelector(),
-                vol.Optional(CONF_BUTTON_WIDTH, default=button_data.get(CONF_BUTTON_WIDTH, 1)): NumberSelector(NumberSelectorConfig(min=1, max=10, step=1)),
-                vol.Optional(CONF_LABEL_FORMULA, default=button_data.get(CONF_LABEL_FORMULA, "")): TextSelector(),
-                vol.Optional(CONF_BG_COLOR_FORMULA, default=button_data.get(CONF_BG_COLOR_FORMULA, "")): TextSelector(),
-                vol.Optional(CONF_TEXT_COLOR_FORMULA, default=button_data.get(CONF_TEXT_COLOR_FORMULA, "")): TextSelector(),
-                vol.Optional(CONF_ACTION, default=button_data.get(CONF_ACTION, {})): ActionSelector(),
-            })
+                vol.Required(CONF_ID, default=b.get(CONF_ID, "")): TextSelector(),
+                vol.Required(CONF_BUTTON_WIDTH, default=b.get(CONF_BUTTON_WIDTH, 1)):
+                    NumberSelector(NumberSelectorConfig(min=1, max=6, step=1)),
+                vol.Optional(CONF_LABEL_FORMULA, default=b.get(CONF_LABEL_FORMULA, DEFAULT_BUTTON[CONF_LABEL_FORMULA])): TextSelector(),
+                vol.Optional(CONF_TEXT_COLOR_FORMULA, default=b.get(CONF_TEXT_COLOR_FORMULA, DEFAULT_BUTTON[CONF_TEXT_COLOR_FORMULA])): TextSelector(),
+                vol.Optional(CONF_BG_COLOR_FORMULA, default=b.get(CONF_BG_COLOR_FORMULA, DEFAULT_BUTTON[CONF_BG_COLOR_FORMULA])): TextSelector(),
+                # Power users can still pick via ActionSelector (optional)
+                vol.Optional(CONF_ACTION, default=b.get(CONF_ACTION, {})): ActionSelector(),
+                # YAML editor for paste-from-DevTools
+                vol.Optional("action_yaml", default=existing_yaml): yaml_editor,
+            }),
+            errors=errors
         )
-
-    async def async_step_control_grid(self, user_input=None):
-        """Handle Button Grid configuration."""
-        if user_input is not None:
-            self.control_data.setdefault(CONF_GRID, {})
-            self.control_data[CONF_GRID].update(user_input)
-            return await self.async_step_grid_rows_menu()
-
-        grid_data = self.control_data.get(CONF_GRID, {})
-
-        return self.async_show_form(
-            step_id="control_grid",
-            data_schema=vol.Schema({
-                vol.Optional(CONF_GRID_LABEL, default=grid_data.get(CONF_GRID_LABEL, "")): TextSelector(),
-                vol.Optional(CONF_GRID_BG, default=grid_data.get(CONF_GRID_BG, "")): TextSelector(),
-                vol.Optional(CONF_GRID_RADIUS, default=grid_data.get(CONF_GRID_RADIUS, "")): TextSelector(),
-                vol.Optional(CONF_GRID_PADDING, default=grid_data.get(CONF_GRID_PADDING, "")): TextSelector(),
-            })
-        )
-
-    async def async_step_grid_rows_menu(self, user_input=None):
-        """Menu for adding/editing rows in a grid."""
-        
-        grid_data = self.control_data.get(CONF_GRID, {})
-        rows = grid_data.get(CONF_ROWS, [])
-
-        if user_input:
-            action = user_input["action"]
-            if action == "add_row":
-                self.current_row_index = None
-                return await self.async_step_row()
-            if action == "back":
-                # This will save the grid config and return to the main controls list
-                await self._save_control(stay_in_flow=True)
-                return await self.async_step_controls()
-            
-            self.current_row_index = int(action)
-            return await self.async_step_row_menu()
-
-        row_map = {str(i): f"Row {i+1}" for i, r in enumerate(rows)}
-
-        return self.async_show_form(
-            step_id="grid_rows_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "add_row": "Add a new row",
-                    **row_map,
-                    "back": "Save and go back",
-                })
-            })
-        )
-        
-    # ---------------- Save helpers ----------------
-
-    async def _save_control(self, stay_in_flow: bool = False):
-        devices = self.working.get(CONF_DEVICES, [])
-        device = next(
-            (d for d in devices if d[CONF_ID] == self.current_device_id),
-            None
-        )
-        if not device:
-            return self.async_abort(reason="unknown")
-
-        controls = device.get(CONF_CONTROLS, [])
-
-        if self.current_control_id:
-            for i, c in enumerate(controls):
-                if c[CONF_ID] == self.current_control_id:
-                    controls[i] = {**c, **self.control_data}
-                    break
-        else:
-            self.control_data[CONF_ID] = str(uuid.uuid4())
-            controls.append(self.control_data)
-
-        device[CONF_CONTROLS] = controls
-        self.working[CONF_DEVICES] = devices
-
-        if not stay_in_flow:
-            return await self._do_save_and_exit()
-
-    async def _do_save_and_exit(self):
-        res = self.async_create_entry(title="", data=self.working)
-        try:
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        except Exception as e:
-            _LOGGER.debug("Reload after save failed: %s", e)
-        return res
