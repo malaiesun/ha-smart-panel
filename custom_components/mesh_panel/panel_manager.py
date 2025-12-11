@@ -15,7 +15,18 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 import homeassistant.util.color as color_util
 
-from .const import *
+from .const import (
+    DOMAIN,
+    CONF_DEVICES,
+    CONF_ID, CONF_NAME, CONF_ICON, CONF_CONTROLS,
+    CONF_LABEL, CONF_TYPE, CONF_ENTITY,
+    CONF_MIN, CONF_MAX, CONF_STEP, CONF_OPTIONS,
+    CONF_GRID, CONF_ROWS, CONF_BUTTONS, CONF_ACTION,
+    CONTROL_TYPES,
+    TOPIC_ANNOUNCE, TOPIC_UI_FMT, TOPIC_STATE_FMT,
+    TOPIC_ACTION_FMT, TOPIC_NOTIFY_FMT,
+    SIGNAL_MQTT_PAYLOAD,
+)
 from .const import SIGNAL_MQTT_PAYLOAD
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,6 +151,18 @@ class MeshPanelController:
                     return control
         return None
 
+    def _find_button_action(self, button_id: str):
+        """Find a button's action config by its ID."""
+        for dev in self.devices_config:
+            for control in dev.get(CONF_CONTROLS, []):
+                if control.get(CONF_TYPE) == "button_grid":
+                    grid = control.get(CONF_GRID, {})
+                    for row in grid.get(CONF_ROWS, []):
+                        for button in row.get(CONF_BUTTONS, []):
+                            if button.get(CONF_ID) == button_id:
+                                return button.get(CONF_ACTION)
+        return None
+
     async def _register_services(self):
         """Notify support."""
         async def _notify(call):
@@ -161,6 +184,14 @@ class MeshPanelController:
             # Panel sends "id" for commands
             raw_id = data.get("id")
             if not raw_id:
+                return
+
+            if data.get("action") == "pressed":
+                action_config = self._find_button_action(raw_id)
+                if action_config:
+                    await self.hass.helpers.service.async_call_from_config(
+                        action_config,
+                    )
                 return
 
             if data.get("get_state"):

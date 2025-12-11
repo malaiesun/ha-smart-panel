@@ -21,8 +21,27 @@ CONF_MAX = "max"
 CONF_STEP = "step"
 CONF_OPTIONS = "options"
 
+# Button Grid keys
+CONF_GRID = "grid"
+CONF_GRID_LABEL = "grid_label"
+CONF_GRID_BG = "grid_bg"
+CONF_GRID_RADIUS = "grid_radius"
+CONF_GRID_PADDING = "grid_padding"
+CONF_ROWS = "rows"
+CONF_ROW_HEIGHT = "row_height"
+CONF_ROW_BG = "row_bg"
+CONF_ROW_RADIUS = "row_radius"
+CONF_ROW_PADDING = "row_padding"
+CONF_BUTTONS = "buttons"
+CONF_BUTTON_WIDTH = "width"
+CONF_ACTION = "action"
+CONF_LABEL_FORMULA = "label_formula"
+CONF_BG_COLOR_FORMULA = "bg_color_formula"
+CONF_TEXT_COLOR_FORMULA = "text_color_formula"
+
 # Control types
 CONTROL_TYPES = [
+    {"value": "button_grid", "label": "Button Grid"},
     {"value": "switch", "label": "Switch (On/Off)"},
     {"value": "slider", "label": "Slider (Brightness/Volume)"},
     {"value": "color", "label": "Color Wheel"},

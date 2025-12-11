@@ -25,6 +25,7 @@ from homeassistant.helpers.selector import (
     EntitySelector,
     IconSelector,
     NumberSelector, NumberSelectorConfig,
+    ActionSelector,
 )
 
 from .const import (
@@ -33,6 +34,11 @@ from .const import (
     CONF_ID, CONF_NAME, CONF_ICON, CONF_CONTROLS,
     CONF_LABEL, CONF_TYPE, CONF_ENTITY,
     CONF_MIN, CONF_MAX, CONF_STEP, CONF_OPTIONS,
+    CONF_GRID, CONF_GRID_LABEL, CONF_GRID_BG, CONF_GRID_RADIUS,
+    CONF_GRID_PADDING, CONF_ROWS, CONF_ROW_HEIGHT, CONF_ROW_BG,
+    CONF_ROW_RADIUS, CONF_ROW_PADDING, CONF_BUTTONS, CONF_BUTTON_WIDTH,
+    CONF_ACTION, CONF_LABEL_FORMULA, CONF_BG_COLOR_FORMULA,
+    CONF_TEXT_COLOR_FORMULA,
     CONTROL_TYPES,
 )
 
@@ -192,6 +198,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
         self.current_device_id: str | None = None
         self.current_control_id: str | None = None
         self.control_data: Dict[str, Any] = {}
+        self.current_row_index: int | None = None
+        self.current_button_index: int | None = None
 
     # ---------------- Devices root ----------------
 
@@ -376,6 +384,8 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_control_slider()
             if self.control_data[CONF_TYPE] == "select":
                 return await self.async_step_control_select()
+            if self.control_data[CONF_TYPE] == "button_grid":
+                return await self.async_step_control_grid()
 
             await self._save_control(stay_in_flow=True)
             return await self.async_step_controls()
@@ -389,7 +399,7 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                         options=CONTROL_TYPES,
                         mode=SelectSelectorMode.DROPDOWN
                     )),
-                vol.Required(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "")): EntitySelector(),
+                vol.Optional(CONF_ENTITY, default=self.control_data.get(CONF_ENTITY, "")): EntitySelector(),
             })
         )
 
@@ -478,6 +488,204 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 "entity_id": self.control_data.get(CONF_ENTITY, "Unknown"),
             }
         )
+
+    # ---------------- Button Grid Rows & Buttons ----------------
+
+    async def async_step_row_menu(self, user_input=None):
+        if user_input:
+            action = user_input["action"]
+            if action == "edit_row":
+                return await self.async_step_row()
+            if action == "manage_buttons":
+                return await self.async_step_row_buttons_menu()
+            if action == "delete_row":
+                grid_data = self.control_data.get(CONF_GRID, {})
+                rows = grid_data.get(CONF_ROWS, [])
+                rows.pop(self.current_row_index)
+                grid_data[CONF_ROWS] = rows
+                self.control_data[CONF_GRID] = grid_data
+                return await self.async_step_grid_rows_menu()
+            if action == "back":
+                return await self.async_step_grid_rows_menu()
+
+        return self.async_show_form(
+            step_id="row_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "edit_row": "Edit Row Properties",
+                    "manage_buttons": "Manage Buttons",
+                    "delete_row": "Delete Row",
+                    "back": "Back to Rows",
+                })
+            })
+        )
+
+    async def async_step_row(self, user_input=None):
+        grid_data = self.control_data.get(CONF_GRID, {})
+        rows = grid_data.get(CONF_ROWS, [])
+        row_data = {}
+        if self.current_row_index is not None and self.current_row_index < len(rows):
+            row_data = rows[self.current_row_index]
+
+        if user_input is not None:
+            if self.current_row_index is None:
+                rows.append(user_input)
+                self.current_row_index = len(rows) - 1
+            else:
+                rows[self.current_row_index] = user_input
+            
+            grid_data[CONF_ROWS] = rows
+            self.control_data[CONF_GRID] = grid_data
+            return await self.async_step_row_menu()
+
+        return self.async_show_form(
+            step_id="row",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_ROW_HEIGHT, default=row_data.get(CONF_ROW_HEIGHT, 1.0)): NumberSelector(NumberSelectorConfig(min=0.1, max=10.0, step=0.1)),
+                vol.Optional(CONF_ROW_BG, default=row_data.get(CONF_ROW_BG, "")): TextSelector(),
+                vol.Optional(CONF_ROW_RADIUS, default=row_data.get(CONF_ROW_RADIUS, "")): TextSelector(),
+                vol.Optional(CONF_ROW_PADDING, default=row_data.get(CONF_ROW_PADDING, "")): TextSelector(),
+                vol.Optional(CONF_BUTTONS, default=row_data.get(CONF_BUTTONS, [])): vol.In([]), # Not directly editable here
+            })
+        )
+
+    async def async_step_row_buttons_menu(self, user_input=None):
+        grid_data = self.control_data.get(CONF_GRID, {})
+        row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
+        buttons = row_data.get(CONF_BUTTONS, [])
+
+        if user_input:
+            action = user_input["action"]
+            if action == "add_button":
+                self.current_button_index = None
+                return await self.async_step_button()
+            if action == "back":
+                return await self.async_step_row_menu()
+            
+            self.current_button_index = int(action)
+            return await self.async_step_button_menu()
+
+        button_map = {str(i): b.get(CONF_ID, f"Button {i+1}") for i, b in enumerate(buttons)}
+
+        return self.async_show_form(
+            step_id="row_buttons_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "add_button": "Add a new button",
+                    **button_map,
+                    "back": "Back to Row Menu",
+                })
+            })
+        )
+
+    async def async_step_button_menu(self, user_input=None):
+        if user_input:
+            action = user_input["action"]
+            if action == "edit_button":
+                return await self.async_step_button()
+            if action == "delete_button":
+                grid_data = self.control_data.get(CONF_GRID, {})
+                row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
+                buttons = row_data.get(CONF_BUTTONS, [])
+                buttons.pop(self.current_button_index)
+                row_data[CONF_BUTTONS] = buttons
+                self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index] = row_data
+                return await self.async_step_row_buttons_menu()
+            if action == "back":
+                return await self.async_step_row_buttons_menu()
+
+        return self.async_show_form(
+            step_id="button_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "edit_button": "Edit Button",
+                    "delete_button": "Delete Button",
+                    "back": "Back to Buttons",
+                })
+            })
+        )
+
+    async def async_step_button(self, user_input=None):
+        grid_data = self.control_data.get(CONF_GRID, {})
+        row_data = grid_data.get(CONF_ROWS, [])[self.current_row_index]
+        buttons = row_data.get(CONF_BUTTONS, [])
+        button_data = {}
+        if self.current_button_index is not None and self.current_button_index < len(buttons):
+            button_data = buttons[self.current_button_index]
+
+        if user_input is not None:
+            if self.current_button_index is None:
+                buttons.append(user_input)
+            else:
+                buttons[self.current_button_index] = user_input
+            
+            row_data[CONF_BUTTONS] = buttons
+            self.control_data[CONF_GRID][CONF_ROWS][self.current_row_index] = row_data
+            return await self.async_step_row_buttons_menu()
+
+        return self.async_show_form(
+            step_id="button",
+            data_schema=vol.Schema({
+                vol.Required(CONF_ID, default=button_data.get(CONF_ID, "")): TextSelector(),
+                vol.Optional(CONF_BUTTON_WIDTH, default=button_data.get(CONF_BUTTON_WIDTH, 1)): NumberSelector(NumberSelectorConfig(min=1, max=10, step=1)),
+                vol.Optional(CONF_LABEL_FORMULA, default=button_data.get(CONF_LABEL_FORMULA, "")): TextSelector(),
+                vol.Optional(CONF_BG_COLOR_FORMULA, default=button_data.get(CONF_BG_COLOR_FORMULA, "")): TextSelector(),
+                vol.Optional(CONF_TEXT_COLOR_FORMULA, default=button_data.get(CONF_TEXT_COLOR_FORMULA, "")): TextSelector(),
+                vol.Optional(CONF_ACTION, default=button_data.get(CONF_ACTION, {})): ActionSelector(),
+            })
+        )
+
+    async def async_step_control_grid(self, user_input=None):
+        """Handle Button Grid configuration."""
+        if user_input is not None:
+            self.control_data.setdefault(CONF_GRID, {})
+            self.control_data[CONF_GRID].update(user_input)
+            return await self.async_step_grid_rows_menu()
+
+        grid_data = self.control_data.get(CONF_GRID, {})
+
+        return self.async_show_form(
+            step_id="control_grid",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_GRID_LABEL, default=grid_data.get(CONF_GRID_LABEL, "")): TextSelector(),
+                vol.Optional(CONF_GRID_BG, default=grid_data.get(CONF_GRID_BG, "")): TextSelector(),
+                vol.Optional(CONF_GRID_RADIUS, default=grid_data.get(CONF_GRID_RADIUS, "")): TextSelector(),
+                vol.Optional(CONF_GRID_PADDING, default=grid_data.get(CONF_GRID_PADDING, "")): TextSelector(),
+            })
+        )
+
+    async def async_step_grid_rows_menu(self, user_input=None):
+        """Menu for adding/editing rows in a grid."""
+        
+        grid_data = self.control_data.get(CONF_GRID, {})
+        rows = grid_data.get(CONF_ROWS, [])
+
+        if user_input:
+            action = user_input["action"]
+            if action == "add_row":
+                self.current_row_index = None
+                return await self.async_step_row()
+            if action == "back":
+                # This will save the grid config and return to the main controls list
+                await self._save_control(stay_in_flow=True)
+                return await self.async_step_controls()
+            
+            self.current_row_index = int(action)
+            return await self.async_step_row_menu()
+
+        row_map = {str(i): f"Row {i+1}" for i, r in enumerate(rows)}
+
+        return self.async_show_form(
+            step_id="grid_rows_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "add_row": "Add a new row",
+                    **row_map,
+                    "back": "Save and go back",
+                })
+            })
+        )
+        
     # ---------------- Save helpers ----------------
 
     async def _save_control(self, stay_in_flow: bool = False):
