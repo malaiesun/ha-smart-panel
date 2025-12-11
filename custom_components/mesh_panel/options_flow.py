@@ -544,10 +544,12 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             if self.current_row_index is None:
+                user_input[CONF_BUTTONS] = []
                 rows.append(user_input)
                 self.current_row_index = len(rows) - 1
             else:
-                rows[self.current_row_index] = user_input
+                row_data.update(user_input)
+                rows[self.current_row_index] = row_data
             
             grid_data[CONF_ROWS] = rows
             self.control_data[CONF_GRID] = grid_data
@@ -560,7 +562,6 @@ class MeshPanelOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(CONF_ROW_BG, default=row_data.get(CONF_ROW_BG, "")): TextSelector(),
                 vol.Optional(CONF_ROW_RADIUS, default=row_data.get(CONF_ROW_RADIUS, "")): TextSelector(),
                 vol.Optional(CONF_ROW_PADDING, default=row_data.get(CONF_ROW_PADDING, "")): TextSelector(),
-                vol.Optional(CONF_BUTTONS, default=row_data.get(CONF_BUTTONS, [])): vol.In([]), # Not directly editable here
             })
         )
 
